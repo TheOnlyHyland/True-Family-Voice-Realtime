@@ -137,9 +137,13 @@ if bashio::config.has_value 'vad_silence_duration_ms'; then
     export VAD_SILENCE_DURATION_MS
 fi
 
+# Rapid-pilot full duplex: the Voice PE keeps its AEC microphone stream open
+# during replies, so let Realtime server VAD cancel speech when the user talks.
+export INTERRUPT_RESPONSE=true
+
 # Removed options (v0.4.29) — no longer exported; main.py env defaults take
 # over: SEMANTIC_VAD_CREATE_RESPONSE=true, ENABLE_DISCONNECT_TOOL=false,
-# INTERRUPT_RESPONSE=false, DEVICE_INPUT_SAMPLE_RATE=16000.
+# DEVICE_INPUT_SAMPLE_RATE=16000.
 
 # Export HA_MCP_URL if set (empty string means use default in main.py)
 if [ -n "$HA_MCP_URL" ]; then
