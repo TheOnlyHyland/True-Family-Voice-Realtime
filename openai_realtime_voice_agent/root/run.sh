@@ -137,9 +137,11 @@ if bashio::config.has_value 'vad_silence_duration_ms'; then
     export VAD_SILENCE_DURATION_MS
 fi
 
-# Rapid-pilot full duplex: the Voice PE keeps its AEC microphone stream open
-# during replies, so let Realtime server VAD cancel speech when the user talks.
-export INTERRUPT_RESPONSE=true
+# The Voice PE's speaker output leaks into its microphone strongly enough to
+# trigger Realtime server VAD even with far-field filtering and reduced volume.
+# Keep automatic interruption off; local "Stop", the center button, and the
+# post-reply follow-up window remain available.
+export INTERRUPT_RESPONSE=false
 
 # Removed options (v0.4.29) — no longer exported; main.py env defaults take
 # over: SEMANTIC_VAD_CREATE_RESPONSE=true, ENABLE_DISCONNECT_TOOL=false,
