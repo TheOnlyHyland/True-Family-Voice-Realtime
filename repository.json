@@ -1,12 +1,12 @@
 {
-  "name": "Voice PE Realtime",
-  "url": "https://github.com/TristanBrotherton/voicepe-realtime",
-  "maintainer": "TristanBrotherton",
+  "name": "True Family Voice Realtime",
+  "url": "https://github.com/TheOnlyHyland/True-Family-Voice-Realtime",
+  "maintainer": "True Tech Solutions",
   "addons": [
     {
       "slug": "openai_realtime_voice_agent",
-      "name": "Voice PE Realtime \u2014 Voice Agent",
-      "version": "0.16.3"
+      "name": "True Family Voice Realtime",
+      "version": "0.17.0"
     }
   ]
 }

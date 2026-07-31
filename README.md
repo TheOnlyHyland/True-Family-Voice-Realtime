@@ -72,16 +72,16 @@ Home Assistant Voice PE           Home Assistant (your box)              Cloud
 
 Three parts:
 
-1. **Firmware** ([voicepe-realtime-firmware](https://github.com/TristanBrotherton/voicepe-realtime-firmware)) — turns the Voice PE into a thin, low-latency audio client. Wake word runs on-device.
+1. **Firmware** ([True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)) — turns the Voice PE into a thin, low-latency audio client. Wake word runs on-device.
 2. **Backend add-on** (this repo) — owns the OpenAI Realtime session, Home Assistant tools, speaker identity, timers, and memory.
 3. **[OpenClaw](https://openclaw.ai) integration** (optional) — deep recall, messaging, calls, and long-running task delegation ([agent-agnostic contracts](docs/agent-integration.md)). Everything else works without it.
 
 ## Quick start
 
 1. **Install the add-on**: Settings → Add-ons → Add-on Store → ⋮ → Repositories → add
-   `https://github.com/TristanBrotherton/voicepe-realtime` → install **OpenAI Realtime 2 Voice Agent**. Set your OpenAI API key.
+   `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime` → install **True Family Voice Realtime**. Set your OpenAI API key.
 2. **Give it your home**: add Home Assistant's **MCP Server** integration and expose the entities you want voice-controlled to Assist.
-3. **Flash the firmware**: adopt your Voice PE in ESPHome Builder and paste in the [device stub](https://github.com/TristanBrotherton/voicepe-realtime-firmware/blob/main/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB, updates OTA.
+3. **Flash the firmware**: adopt your Voice PE in ESPHome Builder and paste in the [device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/main/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB, updates OTA.
 4. Say **"Hey Leonard"** and ask for a light.
 
 Full walkthrough (~30–45 minutes from zero): **[Getting Started](docs/getting-started.md)**.
@@ -98,7 +98,7 @@ Full walkthrough (~30–45 minutes from zero): **[Getting Started](docs/getting-
 | [FAQ](docs/faq.md) | Cost, privacy, reverting to stock, Raspberry Pi, languages, and more |
 | [Contributing](CONTRIBUTING.md) | PRs welcome — small, tested, explained |
 
-The firmware lives in its own repo: **[TristanBrotherton/voicepe-realtime-firmware](https://github.com/TristanBrotherton/voicepe-realtime-firmware)**.
+The firmware lives in its own repo: **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**.
 
 ## Credits
 

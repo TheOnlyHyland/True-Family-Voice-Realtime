@@ -690,32 +690,16 @@ class Application:
         """Update session activity timestamp (called by SessionActivityTracker)."""
         pass
     
-    async def _ensure_openai_service(self, client_id: Optional[str] = None):
-        """Create a new OpenAI service instance for a client.
-        
-        Args:
-            client_id: Optional client ID for session management
-        """
+    async def _ensure_openai_service(self):
+        """Create the single OpenAI service used by the live pipeline."""
         if self._pipeline_lock is None:
             self._pipeline_lock = asyncio.Lock()
         
         async with self._pipeline_lock:
-            if client_id is None:
-                logger.warning("⚠️ No client_id provided to _ensure_openai_service")
-            
-            # Create new session
-            if client_id:
-                logger.info(f"🆕 Creating new OpenAI Session for Client {client_id}...")
-            else:
-                logger.info("🆕 Creating new OpenAI Session...")
-            
-            # Cache context from old service before creating new one
-            if client_id and self.openai_service is not None:
-                try:
-                    self.session_manager.cleanup_before_new_session(client_id)
-                    logger.debug(f"Cached context from previous session for client {client_id}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Error caching context from old service for client {client_id}: {e}")
+            if self.openai_service is not None:
+                return self.openai_service
+
+            logger.info("🆕 Creating authoritative OpenAI Session...")
             
             # Create session properties with audio configuration
             from pipecat.services.openai.realtime.events import (
@@ -941,10 +925,6 @@ class Application:
                 register_openclaw_tool(self.openai_service)
                 logger.info("✅ DIRECT ask_openclaw re-registered after MCP handlers (wins)")
             
-            # Register service with session manager
-            if client_id:
-                self.session_manager.set_current_service(client_id, self.openai_service)
-            
             logger.info("✅ New OpenAI Session created")
             return self.openai_service
     
@@ -952,7 +932,7 @@ class Application:
         """Run the application."""
         await self.initialize()
         
-        # Create initial OpenAI service (will be replaced per connection)
+        # Create the authoritative OpenAI service before the pipeline captures it.
         await self._ensure_openai_service()
         
         # Build pipeline - based on pipecat-examples, one pipeline handles all connections
@@ -1009,7 +989,10 @@ class Application:
         # Setup WebSocket event handlers
         async def on_client_connected(client_id: str):
             """Handle new client connection."""
-            await self._ensure_openai_service(client_id=client_id)
+            if self.openai_service is None:
+                raise RuntimeError("OpenAI service is unavailable for client connection")
+            if self.session_manager:
+                self.session_manager.set_current_service(client_id, self.openai_service)
             if self.audio_recording_service:
                 self.audio_recording_service.start_new_session(client_id)
         
@@ -1024,7 +1007,9 @@ class Application:
         def get_openai_service_for_client(client_id: str) -> Optional[OpenAIRealtimeLLMService]:
             """Get OpenAI service for a specific client."""
             if self.session_manager:
-                return self.session_manager.get_current_service(client_id)
+                service = self.session_manager.get_current_service(client_id)
+                if service is not None:
+                    return service
             return self.openai_service
         
         self.websocket_handler.setup_event_handlers(
