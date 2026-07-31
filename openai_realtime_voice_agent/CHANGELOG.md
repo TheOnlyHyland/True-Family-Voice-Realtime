@@ -2,6 +2,12 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.20.1 (fork)
+
+- Standalone thanks after a completed action now closes the conversation. The
+  redundant two-second post-tool cooldown was removed; generation-bound mixed
+  tool cancellation remains authoritative.
+
 ## 0.20.0 (fork)
 
 - Added graceful `end_conversation` handling: the model can mark a clearly

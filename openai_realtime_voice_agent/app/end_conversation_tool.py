@@ -17,8 +17,9 @@ def get_end_conversation_tool_definition() -> Dict[str, Any]:
         "description": (
             "Call immediately before your final short spoken reply only when the "
             "conversation is clearly complete and no answer is expected: for example, "
-            "an explicit goodbye, 'that's all', or a settled exchange with no pending "
-            "question. This lets the final reply finish and then closes the follow-up "
+            "an explicit goodbye, 'that's all', a standalone thanks after a completed "
+            "request, or a settled exchange with no pending question. This lets the "
+            "final reply finish and then closes the follow-up "
             "microphone. Do not call merely because you can answer the current question, "
             "during an ordinary conversational pause, when the user may naturally "
             "continue, or when your reply asks a question. Never call this alongside "

@@ -975,14 +975,7 @@ class Application:
             register_end_conversation_tool(
                 self.openai_service,
                 self.websocket_handler.request_graceful_close,
-                lambda: (
-                    TURN_LIVENESS.in_flight == 1
-                    and (
-                        asyncio.get_running_loop().time()
-                        - TURN_LIVENESS.last_non_close_tool_start
-                    )
-                    >= 2.0
-                ),
+                lambda: TURN_LIVENESS.in_flight == 1,
             )
             logger.info("✅ Registered graceful end_conversation tool")
             
