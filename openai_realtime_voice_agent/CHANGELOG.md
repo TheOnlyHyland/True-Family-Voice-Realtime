@@ -2,6 +2,11 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.19.0 (fork)
+
+- Added the authoritative `turn_on_room_lights` tool with strict approved-room
+  mappings, ordered mixed-Zigbee ON sequences, and non-retry failure reporting.
+
 ## 0.18.0 (fork)
 
 - Added the strictly read-only `get_calendar_events` voice tool for 11 approved

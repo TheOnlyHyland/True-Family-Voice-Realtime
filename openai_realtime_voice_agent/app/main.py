@@ -19,6 +19,11 @@ from app.calendar_tool import (
     get_calendar_tool_definition,
     register_calendar_tool,
 )
+from app.room_light_tool import (
+    ROOM_LIGHT_TOOL_NAME,
+    get_room_light_tool_definition,
+    register_room_light_tool,
+)
 from app.audio_recording_service import AudioRecordingService
 from app.session_manager import SessionManager
 from app.websocket_handler import WebSocketHandler
@@ -736,6 +741,9 @@ class Application:
             # Bounded, read-only reads from the approved Home Assistant calendars.
             all_tools.append(get_calendar_tool_definition())
 
+            # Authoritative ON sequences for approved mixed Zigbee room groups.
+            all_tools.append(get_room_light_tool_definition())
+
             # Voice enrollment tool (fork): guided voice-training capture.
             all_tools.append(get_enrollment_tool_definition())
             all_tools.append(get_false_alarm_tool_definition())
@@ -760,7 +768,10 @@ class Application:
                     # with ha-mcp's 80+ tools.
                     exposed = 0
                     for function_schema in mcp_tools_schema.standard_tools:
-                        if function_schema.name == CALENDAR_TOOL_NAME:
+                        if function_schema.name in (
+                            CALENDAR_TOOL_NAME,
+                            ROOM_LIGHT_TOOL_NAME,
+                        ):
                             continue
                         if self.mcp_tool_allowlist and function_schema.name not in self.mcp_tool_allowlist:
                             continue
@@ -937,10 +948,12 @@ class Application:
                 register_openclaw_tool(self.openai_service)
                 logger.info("✅ DIRECT ask_openclaw re-registered after MCP handlers (wins)")
             # Register after MCP because Pipecat registers every MCP handler,
-            # including schemas not exposed to the model. The native read-only
-            # implementation must remain authoritative if names ever collide.
+            # including schemas not exposed to the model. Native implementations
+            # must remain authoritative if names ever collide.
             register_calendar_tool(self.openai_service, self.ha_access_token)
             logger.info("✅ Registered read-only get_calendar_events tool")
+            register_room_light_tool(self.openai_service, self.ha_access_token)
+            logger.info("✅ Registered authoritative turn_on_room_lights tool")
             
             logger.info("✅ New OpenAI Session created")
             return self.openai_service

@@ -13,6 +13,7 @@ and which options drive it. Option details live in the
 - [False-wake flagging](#false-wake-flagging)
 - [The retrain flywheel](#the-retrain-flywheel)
 - [Calendar lookups](#calendar-lookups)
+- [Authoritative room-light ON](#authoritative-room-light-on)
 - [Web search](#web-search)
 - [HA sensors](#ha-sensors)
 - [Persona & voices](#persona--voices)
@@ -292,6 +293,17 @@ Each call requires explicit timezone-aware ISO 8601 start and end timestamps. Th
 end must be after the start, the range is capped at 31 days, and at most 20 events
 are returned. Results contain only summary, start, end, location when present, and
 whether the event is all-day; descriptions and unrelated calendar data are omitted.
+
+---
+
+## Authoritative room-light ON
+
+The built-in `turn_on_room_lights` tool accepts only an approved room name and
+runs that room's fixed, ordered Home Assistant service sequence. It is used
+instead of generic `HassTurnOn` for room-light ON requests because mixed Zigbee
+groups do not reliably restore a coherent state from a generic call. The tool
+cannot accept arbitrary entities, services, or MQTT topics, stops at the first
+failed step, and does not automatically retry.
 
 ---
 
