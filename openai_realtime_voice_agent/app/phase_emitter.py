@@ -230,9 +230,14 @@ class PhaseEmitter(FrameProcessor):
         self._idle_task = None
 
     def _cancel_watchdog(self) -> None:
-        if self._watchdog_task is not None and not self._watchdog_task.done():
-            self._watchdog_task.cancel()
+        watchdog_task = self._watchdog_task
         self._watchdog_task = None
+        if (
+            watchdog_task is not None
+            and watchdog_task is not asyncio.current_task()
+            and not watchdog_task.done()
+        ):
+            watchdog_task.cancel()
 
     def _arm_watchdog(self) -> None:
         self._cancel_watchdog()

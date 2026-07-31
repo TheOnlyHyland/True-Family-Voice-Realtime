@@ -2,6 +2,12 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.20.2 (fork)
+
+- Fixed the dead-turn watchdog cancelling itself before its `idle` phase could
+  reach the Voice PE, preventing a stalled response from leaving the device on
+  the white thinking spinner indefinitely.
+
 ## 0.20.1 (fork)
 
 - Standalone thanks after a completed action now closes the conversation. The
