@@ -92,6 +92,8 @@ class TurnLiveness:
     def __init__(self) -> None:
         self.in_flight = 0
         self.last_activity = 0.0
+        self.last_non_close_tool_start = 0.0
+        self.non_close_tool_generation = 0
 
     def tool_started(self) -> None:
         self.in_flight += 1
@@ -100,6 +102,10 @@ class TurnLiveness:
     def tool_finished(self) -> None:
         self.in_flight = max(0, self.in_flight - 1)
         self.last_activity = time.monotonic()
+
+    def non_close_tool_started(self) -> None:
+        self.last_non_close_tool_start = time.monotonic()
+        self.non_close_tool_generation += 1
 
 
 TURN_LIVENESS = TurnLiveness()
@@ -119,7 +125,13 @@ class PhaseEmitter(FrameProcessor):
     # How often to log that we're deliberately waiting on a running tool.
     INFLIGHT_LOG_EVERY_S = 30.0
 
-    def __init__(self, send_phase, idle_debounce_s: float = None, **kwargs):
+    def __init__(
+        self,
+        send_phase,
+        idle_debounce_s: float = None,
+        before_idle=None,
+        **kwargs,
+    ):
         """
         Args:
             send_phase: async callable(value: str) that delivers the phase to
@@ -132,6 +144,7 @@ class PhaseEmitter(FrameProcessor):
         """
         super().__init__(**kwargs)
         self._send_phase = send_phase
+        self._before_idle = before_idle
         if idle_debounce_s is None:
             try:
                 idle_debounce_s = float(os.environ.get("PHASE_IDLE_DEBOUNCE_MS", "1500")) / 1000.0
@@ -243,6 +256,13 @@ class PhaseEmitter(FrameProcessor):
             await self._emit("thinking")
             self._arm_watchdog()
             return
+        if self._before_idle is not None:
+            try:
+                await self._before_idle()
+            except asyncio.CancelledError:
+                return
+            except Exception as error:
+                logger.warning("⚠️ graceful close before idle failed: %r", error)
         await self._emit("idle")
 
     async def _thinking_watchdog(self) -> None:

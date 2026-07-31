@@ -1,5 +1,7 @@
 """Offline lifecycle tests for the single-device voice pipeline."""
 
+import asyncio
+import json
 import sys
 import types
 import unittest
@@ -56,11 +58,18 @@ class _Placeholder:
 
 
 class _TurnLiveness:
+    in_flight = 0
+    last_non_close_tool_start = 0.0
+    non_close_tool_generation = 0
+
     def tool_started(self):
         pass
 
     def tool_finished(self):
         pass
+
+    def non_close_tool_started(self):
+        self.non_close_tool_generation += 1
 
 
 _stub_module("dotenv", load_dotenv=lambda: None)
@@ -196,6 +205,207 @@ class _FakeWebSocketHandler:
 
 
 class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_control_broadcast_is_compact_and_keeps_socket_open(self):
+        class WebSocket:
+            def __init__(self):
+                self.send = AsyncMock()
+                self.close = AsyncMock()
+
+        websocket = cast(Any, WebSocket())
+        handler = websocket_handler.WebSocketHandler()
+        handler._websockets.add(websocket)
+
+        async def acknowledge():
+            while websocket.send.await_count == 0:
+                await asyncio.sleep(0)
+            prepared = json.loads(websocket.send.await_args_list[0].args[0])
+            handler._handle_graceful_close_ack(
+                {
+                    "token": prepared["token"],
+                    "stage": "prepared",
+                    "accepted": True,
+                }
+            )
+            while websocket.send.await_count < 2:
+                await asyncio.sleep(0)
+            committed = json.loads(websocket.send.await_args_list[1].args[0])
+            handler._handle_graceful_close_ack(
+                {
+                    "token": committed["token"],
+                    "stage": "committed",
+                    "accepted": True,
+                }
+            )
+
+        ack_task = asyncio.create_task(acknowledge())
+        await handler.arm_graceful_close()
+        await ack_task
+
+        self.assertEqual(websocket.send.await_count, 2)
+        websocket.close.assert_not_awaited()
+        prepared = json.loads(websocket.send.await_args_list[0].args[0])
+        committed = json.loads(websocket.send.await_args_list[1].args[0])
+        self.assertEqual(prepared["type"], "prepare_suppress_followup")
+        self.assertEqual(committed["type"], "commit_suppress_followup")
+        self.assertEqual(prepared["token"], committed["token"])
+
+    async def test_graceful_close_fails_without_connected_firmware(self):
+        handler = websocket_handler.WebSocketHandler()
+
+        with self.assertRaisesRegex(RuntimeError, "No Voice PE is connected"):
+            await handler.arm_graceful_close()
+
+    async def test_graceful_close_fails_when_firmware_rejects_turn(self):
+        class WebSocket:
+            def __init__(self):
+                self.send = AsyncMock()
+
+        websocket = cast(Any, WebSocket())
+        handler = websocket_handler.WebSocketHandler()
+        handler._websockets.add(websocket)
+
+        async def reject():
+            while websocket.send.await_count == 0:
+                await asyncio.sleep(0)
+            prepared = json.loads(websocket.send.await_args.args[0])
+            handler._handle_graceful_close_ack(
+                {
+                    "token": prepared["token"],
+                    "stage": "prepared",
+                    "accepted": False,
+                }
+            )
+
+        reject_task = asyncio.create_task(reject())
+        with self.assertRaisesRegex(RuntimeError, "rejected graceful close"):
+            await handler.arm_graceful_close()
+        await reject_task
+
+    async def test_new_tool_after_prepare_cancels_instead_of_committing(self):
+        class WebSocket:
+            def __init__(self):
+                self.send = AsyncMock()
+
+        websocket = cast(Any, WebSocket())
+        handler = websocket_handler.WebSocketHandler()
+        handler._websockets.add(websocket)
+        original_generation = websocket_handler.TURN_LIVENESS.non_close_tool_generation
+
+        async def acknowledge_then_start_tool():
+            while websocket.send.await_count == 0:
+                await asyncio.sleep(0)
+            prepared = json.loads(websocket.send.await_args_list[0].args[0])
+            handler._handle_graceful_close_ack(
+                {
+                    "token": prepared["token"],
+                    "stage": "prepared",
+                    "accepted": True,
+                }
+            )
+            websocket_handler.TURN_LIVENESS.non_close_tool_generation += 1
+
+        ack_task = asyncio.create_task(acknowledge_then_start_tool())
+        try:
+            await handler.arm_graceful_close(original_generation)
+            await ack_task
+        finally:
+            websocket_handler.TURN_LIVENESS.non_close_tool_generation = original_generation
+
+        message_types = [
+            json.loads(call.args[0])["type"]
+            for call in websocket.send.await_args_list
+        ]
+        self.assertEqual(
+            message_types,
+            ["prepare_suppress_followup", "cancel_suppress_followup"],
+        )
+
+    async def test_lost_commit_ack_retains_token_for_later_cancellation(self):
+        class WebSocket:
+            def __init__(self):
+                self.send = AsyncMock()
+
+        websocket = cast(Any, WebSocket())
+        handler = websocket_handler.WebSocketHandler()
+        handler._websockets.add(websocket)
+
+        async def acknowledge_prepare_only():
+            while websocket.send.await_count == 0:
+                await asyncio.sleep(0)
+            prepared = json.loads(websocket.send.await_args_list[0].args[0])
+            handler._handle_graceful_close_ack(
+                {
+                    "token": prepared["token"],
+                    "stage": "prepared",
+                    "accepted": True,
+                }
+            )
+
+        ack_task = asyncio.create_task(acknowledge_prepare_only())
+        with self.assertRaisesRegex(RuntimeError, "did not acknowledge.*committed"):
+            await handler.arm_graceful_close()
+        await ack_task
+
+        committed = json.loads(websocket.send.await_args_list[1].args[0])
+        self.assertEqual(handler._graceful_close_committed_token, committed["token"])
+
+        await handler.cancel_graceful_close()
+
+        cancelled = json.loads(websocket.send.await_args_list[2].args[0])
+        self.assertEqual(cancelled["type"], "cancel_suppress_followup")
+        self.assertEqual(cancelled["token"], committed["token"])
+        self.assertIsNone(handler._graceful_close_committed_token)
+
+    async def test_failed_cancel_keeps_token_and_blocks_caller(self):
+        class WebSocket:
+            async def send(self, _message):
+                raise RuntimeError("test send failure")
+
+        handler = websocket_handler.WebSocketHandler()
+        handler._websockets.add(WebSocket())
+        handler._graceful_close_committed_token = 42
+
+        with self.assertRaisesRegex(RuntimeError, "No Voice PE accepted"):
+            await handler.cancel_graceful_close()
+
+        self.assertEqual(handler._graceful_close_committed_token, 42)
+
+    def test_graceful_close_ignores_stale_ack_token(self):
+        handler = websocket_handler.WebSocketHandler()
+        handler._graceful_close_pending_token = 42
+
+        handler._handle_graceful_close_ack(
+            {"token": 41, "stage": "committed", "accepted": True}
+        )
+
+        self.assertFalse(handler._graceful_close_ack.is_set())
+
+    async def test_later_tool_generation_cancels_deferred_close(self):
+        handler = websocket_handler.WebSocketHandler()
+        original_generation = websocket_handler.TURN_LIVENESS.non_close_tool_generation
+        handler.arm_graceful_close = AsyncMock()
+        try:
+            await handler.request_graceful_close()
+            websocket_handler.TURN_LIVENESS.non_close_tool_generation += 1
+
+            await handler._arm_requested_graceful_close()
+
+            handler.arm_graceful_close.assert_not_awaited()
+            self.assertIsNone(handler._graceful_close_requested_generation)
+        finally:
+            websocket_handler.TURN_LIVENESS.non_close_tool_generation = original_generation
+
+    async def test_unchanged_tool_generation_arms_at_bot_stop_boundary(self):
+        handler = websocket_handler.WebSocketHandler()
+        handler.arm_graceful_close = AsyncMock()
+
+        await handler.request_graceful_close()
+        await handler._arm_requested_graceful_close()
+
+        handler.arm_graceful_close.assert_awaited_once_with(
+            websocket_handler.TURN_LIVENESS.non_close_tool_generation
+        )
+
     async def test_build_pipeline_does_not_start_runner(self):
         handler = websocket_handler.WebSocketHandler()
         runner = AsyncMock()

@@ -20,7 +20,7 @@ from pipecat.services.openai.realtime import events as openai_rt_events
 from app.raw_audio_serializer import RawAudioSerializer
 from app.session_manager import SessionManager
 from app.audio_recording_service import AudioRecordingService
-from app.phase_emitter import PhaseEmitter
+from app.phase_emitter import PhaseEmitter, TURN_LIVENESS
 from app.transcript_logger import TranscriptLogger
 
 logger = logging.getLogger(__name__)
@@ -389,6 +389,17 @@ class WebSocketHandler:
         # Connected device websockets, used to push va_client control/phase
         # messages as TEXT frames (the audio path uses the binary serializer).
         self._websockets: set = set()
+        # Graceful close is a single-device acknowledged control transaction.
+        # Old firmware and out-of-turn requests fail closed instead of silently
+        # claiming that the next follow-up will be suppressed.
+        self._graceful_close_lock = asyncio.Lock()
+        self._graceful_close_ack = asyncio.Event()
+        self._graceful_close_next_token = 1
+        self._graceful_close_pending_token: Optional[int] = None
+        self._graceful_close_ack_stage: Optional[str] = None
+        self._graceful_close_accepted = False
+        self._graceful_close_requested_generation: Optional[int] = None
+        self._graceful_close_committed_token: Optional[int] = None
         # Speaker context v1 (fork): set by main.py when speaker names are
         # configured; wired to the serializer + OpenAI service in build_pipeline.
         self.speaker_probe = None
@@ -478,7 +489,10 @@ class WebSocketHandler:
         # idle through PhaseEmitter.force_idle() (consistent phase state +
         # racing-`thinking` suppression); it is APPENDED near the end of the
         # pipeline below, before transport.output().
-        phase_emitter = PhaseEmitter(send_phase=self.broadcast_phase)
+        phase_emitter = PhaseEmitter(
+            send_phase=self.broadcast_phase,
+            before_idle=self._arm_requested_graceful_close,
+        )
 
         pipeline_components = [
             transport.input(),
@@ -715,6 +729,7 @@ class WebSocketHandler:
             # New turn boundary: drop any pending post-tool kill so it can't
             # leak onto this fresh turn's response.
             _kill_next_response["v"] = False
+            self.cancel_graceful_close_request()
 
         # Wire the dangling-VAD guard's kill-window into the PhaseEmitter. It
         # reuses the SAME _interrupt_kill_until + _kill_racing_response machinery
@@ -726,6 +741,7 @@ class WebSocketHandler:
             # window and the post-tool flag so neither can cancel it.
             _interrupt_kill_until["t"] = 0.0
             _kill_next_response["v"] = False
+            self.cancel_graceful_close_request()
 
         phase_emitter.set_kill_window_handlers(
             on_dangling=lambda: _interrupt_kill_until.__setitem__(
@@ -842,6 +858,145 @@ class WebSocketHandler:
         """Send a JSON object to every connected device as a TEXT frame."""
         for ws in list(self._websockets):
             await self._send_json(ws, obj)
+
+    async def _broadcast_json_strict(self, obj: dict) -> None:
+        """Send a control frame or fail when no device accepts the write."""
+        websockets = list(self._websockets)
+        if not websockets:
+            raise RuntimeError("No Voice PE is connected")
+
+        message = json.dumps(obj, separators=(",", ":"))
+        delivered = 0
+        for websocket in websockets:
+            try:
+                await asyncio.wait_for(websocket.send(message), timeout=1.0)
+                delivered += 1
+            except Exception as error:
+                logger.warning(
+                    "⚠️ Could not deliver strict %s control: %r",
+                    obj.get("type"),
+                    error,
+                )
+        if delivered == 0:
+            raise RuntimeError("No Voice PE accepted the control frame")
+
+    async def arm_graceful_close(
+        self,
+        expected_non_close_generation: Optional[int] = None,
+    ) -> None:
+        """Prepare then commit one token-bound, drain-safe graceful close."""
+        async with self._graceful_close_lock:
+            token = self._graceful_close_next_token
+            self._graceful_close_next_token = (token % 0x7FFFFFFF) + 1
+            self._graceful_close_pending_token = token
+            try:
+                await self._send_graceful_close_stage(
+                    "prepare_suppress_followup",
+                    "prepared",
+                    token,
+                )
+                if (
+                    expected_non_close_generation is not None
+                    and expected_non_close_generation
+                    != TURN_LIVENESS.non_close_tool_generation
+                ):
+                    await self._cancel_graceful_close_token(token)
+                    return
+                # Track before transmission: if firmware commits but its ACK is
+                # lost, a later non-close tool still knows which token to cancel.
+                self._graceful_close_committed_token = token
+                await self._send_graceful_close_stage(
+                    "commit_suppress_followup",
+                    "committed",
+                    token,
+                )
+                if (
+                    expected_non_close_generation is not None
+                    and expected_non_close_generation
+                    != TURN_LIVENESS.non_close_tool_generation
+                ):
+                    await self._cancel_graceful_close_token(token)
+            finally:
+                self._graceful_close_pending_token = None
+
+    async def request_graceful_close(self) -> None:
+        """Record a close request; arm it only at the final bot-stop boundary."""
+        self._graceful_close_requested_generation = (
+            TURN_LIVENESS.non_close_tool_generation
+        )
+
+    async def _arm_requested_graceful_close(self) -> None:
+        requested_generation = self._graceful_close_requested_generation
+        self._graceful_close_requested_generation = None
+        if requested_generation is None:
+            return
+        if requested_generation != TURN_LIVENESS.non_close_tool_generation:
+            logger.info("Graceful close cancelled because another tool ran")
+            return
+        await self.arm_graceful_close(requested_generation)
+
+    def cancel_graceful_close_request(self) -> None:
+        """Drop a deferred close at a fresh user-turn boundary."""
+        self._graceful_close_requested_generation = None
+
+    async def cancel_graceful_close(self) -> None:
+        """Invalidate pending/committed close before another tool executes."""
+        self._graceful_close_requested_generation = None
+        async with self._graceful_close_lock:
+            tokens = {
+                token
+                for token in (
+                    self._graceful_close_pending_token,
+                    self._graceful_close_committed_token,
+                )
+                if token is not None
+            }
+            for token in tokens:
+                await self._cancel_graceful_close_token(token)
+
+    async def _cancel_graceful_close_token(self, token: int) -> None:
+        # Fail closed: callers must not execute a competing home action while
+        # firmware may still be armed to suppress that action's follow-up.
+        await self._broadcast_json_strict(
+            {"type": "cancel_suppress_followup", "token": token}
+        )
+        if self._graceful_close_committed_token == token:
+            self._graceful_close_committed_token = None
+
+    async def _send_graceful_close_stage(
+        self,
+        message_type: str,
+        expected_stage: str,
+        token: int,
+    ) -> None:
+        self._graceful_close_accepted = False
+        self._graceful_close_ack_stage = None
+        self._graceful_close_ack.clear()
+        await self._broadcast_json_strict({"type": message_type, "token": token})
+        try:
+            await asyncio.wait_for(self._graceful_close_ack.wait(), timeout=1.0)
+        except TimeoutError as error:
+            raise RuntimeError(
+                f"Voice PE did not acknowledge graceful close {expected_stage}"
+            ) from error
+        if not self._graceful_close_accepted:
+            raise RuntimeError(
+                f"Voice PE rejected graceful close {expected_stage} outside an active turn"
+            )
+        if self._graceful_close_ack_stage != expected_stage:
+            raise RuntimeError(
+                f"Voice PE returned the wrong graceful close stage: "
+                f"{self._graceful_close_ack_stage}"
+            )
+
+    def _handle_graceful_close_ack(self, data: dict) -> None:
+        """Accept only the ACK for the current token; ignore stale devices."""
+        if data.get("token") != self._graceful_close_pending_token:
+            logger.warning("⚠️ Ignoring stale graceful-close ACK")
+            return
+        self._graceful_close_ack_stage = data.get("stage")
+        self._graceful_close_accepted = data.get("accepted") is True
+        self._graceful_close_ack.set()
 
     async def broadcast_bytes(self, data: bytes) -> None:
         """Send raw binary (24 kHz mono PCM16 audio) to every connected device.
@@ -969,6 +1124,8 @@ class WebSocketHandler:
                     elif message_type == "ping":
                         # Keepalive. Reply with pong on the same connection.
                         await self._send_json(websocket, {"type": "pong"})
+                    elif message_type == "suppress_followup_ack":
+                        self._handle_graceful_close_ack(data)
                     else:
                         logger.debug(f"📨 Received message from client {client_id}: {message_type}")
                         

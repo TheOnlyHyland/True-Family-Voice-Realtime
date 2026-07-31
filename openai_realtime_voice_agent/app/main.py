@@ -24,6 +24,11 @@ from app.room_light_tool import (
     get_room_light_tool_definition,
     register_room_light_tool,
 )
+from app.end_conversation_tool import (
+    END_CONVERSATION_TOOL_NAME,
+    get_end_conversation_tool_definition,
+    register_end_conversation_tool,
+)
 from app.audio_recording_service import AudioRecordingService
 from app.session_manager import SessionManager
 from app.websocket_handler import WebSocketHandler
@@ -55,6 +60,7 @@ from app.enrollment import (
 # without threading state through pipecat.
 SPEAKER_PROBE = None
 MALE_ONLY_TOOLS: set = set()
+NON_CLOSE_TOOL_CALLBACK = None
 
 # Configure logging
 logging.basicConfig(
@@ -270,8 +276,13 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                         )
                     })
                     return
+            is_non_close_tool = function_name != END_CONVERSATION_TOOL_NAME
+            if is_non_close_tool:
+                TURN_LIVENESS.non_close_tool_started()
             TURN_LIVENESS.tool_started()
             try:
+                if is_non_close_tool and NON_CLOSE_TOOL_CALLBACK is not None:
+                    await NON_CLOSE_TOOL_CALLBACK()
                 return await handler(params)
             finally:
                 TURN_LIVENESS.tool_finished()
@@ -522,6 +533,8 @@ class Application:
             wake_open_delay_ms=wake_open_delay_ms,
             playback_prebuffer_ms=playback_prebuffer_ms,
         )
+        global NON_CLOSE_TOOL_CALLBACK
+        NON_CLOSE_TOOL_CALLBACK = self.websocket_handler.cancel_graceful_close
         logger.info(
             f"🔁 Follow-up window: {follow_up_listen_seconds}s "
             f"({'enabled' if follow_up_ms > 0 else 'disabled — turn-based'}), "
@@ -744,6 +757,10 @@ class Application:
             # Authoritative ON sequences for approved mixed Zigbee room groups.
             all_tools.append(get_room_light_tool_definition())
 
+            # Graceful model-selected conversation close. Unlike disconnect_client,
+            # this only suppresses the next post-reply mic window after audio drains.
+            all_tools.append(get_end_conversation_tool_definition())
+
             # Voice enrollment tool (fork): guided voice-training capture.
             all_tools.append(get_enrollment_tool_definition())
             all_tools.append(get_false_alarm_tool_definition())
@@ -771,6 +788,7 @@ class Application:
                         if function_schema.name in (
                             CALENDAR_TOOL_NAME,
                             ROOM_LIGHT_TOOL_NAME,
+                            END_CONVERSATION_TOOL_NAME,
                         ):
                             continue
                         if self.mcp_tool_allowlist and function_schema.name not in self.mcp_tool_allowlist:
@@ -954,6 +972,19 @@ class Application:
             logger.info("✅ Registered read-only get_calendar_events tool")
             register_room_light_tool(self.openai_service, self.ha_access_token)
             logger.info("✅ Registered authoritative turn_on_room_lights tool")
+            register_end_conversation_tool(
+                self.openai_service,
+                self.websocket_handler.request_graceful_close,
+                lambda: (
+                    TURN_LIVENESS.in_flight == 1
+                    and (
+                        asyncio.get_running_loop().time()
+                        - TURN_LIVENESS.last_non_close_tool_start
+                    )
+                    >= 2.0
+                ),
+            )
+            logger.info("✅ Registered graceful end_conversation tool")
             
             logger.info("✅ New OpenAI Session created")
             return self.openai_service

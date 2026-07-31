@@ -2,6 +2,14 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.20.0 (fork)
+
+- Added graceful `end_conversation` handling: the model can mark a clearly
+  finished exchange so the Voice PE plays the complete final reply and then
+  skips only the next automatic follow-up window without disconnecting. Paired
+  True Family Voice firmware `0.18.0` or newer is required; older firmware
+  safely rejects the close because it cannot send the required acknowledgement.
+
 ## 0.19.0 (fork)
 
 - Added the authoritative `turn_on_room_lights` tool with strict approved-room
