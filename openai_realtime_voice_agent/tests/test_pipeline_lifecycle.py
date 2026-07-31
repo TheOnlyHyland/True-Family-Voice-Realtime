@@ -255,6 +255,44 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "No Voice PE is connected"):
             await handler.arm_graceful_close()
 
+    async def test_graceful_close_accepts_ack_after_previous_one_second_deadline(self):
+        class WebSocket:
+            def __init__(self):
+                self.send = AsyncMock()
+
+        websocket = cast(Any, WebSocket())
+        handler = websocket_handler.WebSocketHandler()
+        handler._websockets.add(websocket)
+
+        async def acknowledge_after_delay():
+            while websocket.send.await_count == 0:
+                await asyncio.sleep(0)
+            prepared = json.loads(websocket.send.await_args_list[0].args[0])
+            await asyncio.sleep(1.05)
+            handler._handle_graceful_close_ack(
+                {
+                    "token": prepared["token"],
+                    "stage": "prepared",
+                    "accepted": True,
+                }
+            )
+            while websocket.send.await_count < 2:
+                await asyncio.sleep(0)
+            committed = json.loads(websocket.send.await_args_list[1].args[0])
+            handler._handle_graceful_close_ack(
+                {
+                    "token": committed["token"],
+                    "stage": "committed",
+                    "accepted": True,
+                }
+            )
+
+        ack_task = asyncio.create_task(acknowledge_after_delay())
+        await handler.arm_graceful_close()
+        await ack_task
+
+        self.assertEqual(websocket.send.await_count, 2)
+
     async def test_graceful_close_fails_when_firmware_rejects_turn(self):
         class WebSocket:
             def __init__(self):
@@ -327,6 +365,7 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         websocket = cast(Any, WebSocket())
         handler = websocket_handler.WebSocketHandler()
+        handler.GRACEFUL_CLOSE_ACK_TIMEOUT_S = 0.05
         handler._websockets.add(websocket)
 
         async def acknowledge_prepare_only():

@@ -2,6 +2,13 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.20.3 (fork)
+
+- Closing replies now answer the person naturally instead of describing the
+  conversation mechanism. Voice PE close-stage acknowledgements have a
+  three-second deadline with explicit transaction diagnostics, avoiding false
+  failures when the device main loop responds just after the old one-second cap.
+
 ## 0.20.2 (fork)
 
 - Fixed the dead-turn watchdog cancelling itself before its `idle` phase could

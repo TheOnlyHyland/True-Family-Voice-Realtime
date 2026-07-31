@@ -24,7 +24,10 @@ def get_end_conversation_tool_definition() -> Dict[str, Any]:
             "during an ordinary conversational pause, when the user may naturally "
             "continue, or when your reply asks a question. Never call this alongside "
             "another tool: finish all actions first, then call this as the sole tool in "
-            "the next decision. When uncertain, leave the conversation open."
+            "the next decision. Make the final reply a natural response to what the "
+            "person said, such as 'You're welcome.' Never describe closing, ending, "
+            "wrapping up, the microphone, or conversation management. When uncertain, "
+            "leave the conversation open."
         ),
         "parameters": {
             "type": "object",
@@ -79,8 +82,10 @@ def create_end_conversation_tool_handler(
                     else "closing_reply_unconfirmed"
                 ),
                 "instruction": (
-                    "Give at most one brief closing sentence. Do not ask a question or "
-                    "mention this tool."
+                    "Reply naturally to what the person said in at most one brief "
+                    "sentence, for example 'You're welcome.' Do not ask a question and "
+                    "never describe closing, ending, wrapping up, the microphone, this "
+                    "tool, or conversation management."
                 ),
             }
         )

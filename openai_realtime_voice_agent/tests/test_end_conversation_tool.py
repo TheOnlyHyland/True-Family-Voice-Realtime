@@ -36,6 +36,8 @@ class EndConversationToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("final reply finish", definition["description"])
         self.assertIn("When uncertain", definition["description"])
         self.assertIn("Never call this alongside another tool", definition["description"])
+        self.assertIn("You're welcome", definition["description"])
+        self.assertIn("Never describe closing", definition["description"])
 
     async def test_control_is_sent_before_tool_result(self):
         events = []
@@ -53,6 +55,8 @@ class EndConversationToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[1][0], "result")
         self.assertEqual(events[1][1]["status"], "closing_after_reply")
         self.assertIn("Do not ask a question", events[1][1]["instruction"])
+        self.assertIn("You're welcome", events[1][1]["instruction"])
+        self.assertIn("never describe closing", events[1][1]["instruction"])
 
     async def test_control_failure_still_completes_tool_call(self):
         async def fail_control():
@@ -67,7 +71,7 @@ class EndConversationToolTests(unittest.IsolatedAsyncioTestCase):
         callback.assert_awaited_once()
         result = cast(Any, callback.await_args).args[0]
         self.assertEqual(result["status"], "closing_reply_unconfirmed")
-        self.assertIn("brief closing sentence", result["instruction"])
+        self.assertIn("one brief sentence", result["instruction"])
 
     async def test_extra_arguments_do_not_arm_close(self):
         arm_graceful_close = AsyncMock()

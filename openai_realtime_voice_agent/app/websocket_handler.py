@@ -339,6 +339,8 @@ class ConnectionRecovery(FrameProcessor):
 
 class WebSocketHandler:
     """Handles WebSocket transport initialization, pipeline building, and event management."""
+
+    GRACEFUL_CLOSE_ACK_TIMEOUT_S = 3.0
     
     def __init__(
         self,
@@ -972,9 +974,18 @@ class WebSocketHandler:
         self._graceful_close_accepted = False
         self._graceful_close_ack_stage = None
         self._graceful_close_ack.clear()
+        logger.info(
+            "Graceful close %s sent (token=%s); waiting %.1fs for Voice PE ACK",
+            expected_stage,
+            token,
+            self.GRACEFUL_CLOSE_ACK_TIMEOUT_S,
+        )
         await self._broadcast_json_strict({"type": message_type, "token": token})
         try:
-            await asyncio.wait_for(self._graceful_close_ack.wait(), timeout=1.0)
+            await asyncio.wait_for(
+                self._graceful_close_ack.wait(),
+                timeout=self.GRACEFUL_CLOSE_ACK_TIMEOUT_S,
+            )
         except TimeoutError as error:
             raise RuntimeError(
                 f"Voice PE did not acknowledge graceful close {expected_stage}"
@@ -988,9 +999,21 @@ class WebSocketHandler:
                 f"Voice PE returned the wrong graceful close stage: "
                 f"{self._graceful_close_ack_stage}"
             )
+        logger.info(
+            "Graceful close %s acknowledged (token=%s)",
+            expected_stage,
+            token,
+        )
 
     def _handle_graceful_close_ack(self, data: dict) -> None:
         """Accept only the ACK for the current token; ignore stale devices."""
+        logger.info(
+            "Graceful close ACK received: stage=%s token=%s accepted=%s pending=%s",
+            data.get("stage"),
+            data.get("token"),
+            data.get("accepted"),
+            self._graceful_close_pending_token,
+        )
         if data.get("token") != self._graceful_close_pending_token:
             logger.warning("⚠️ Ignoring stale graceful-close ACK")
             return
