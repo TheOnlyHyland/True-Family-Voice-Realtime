@@ -51,6 +51,7 @@ Longer versions, with the how-it-works behind each: **[Stories](docs/stories.md)
 - **Voice timers** — personal announcement → grace period → gentle bell, dismissed by button or voice
 - **False-wake flagging** — by voice, double-press, or automatically; feeds a [weekly retrain flywheel](docs/features.md#the-retrain-flywheel)
 - **Web search** — current info via a single extra OpenAI call (on by default)
+- **Read-only calendar lookups** — bounded event reads from approved Home Assistant calendars; no event writes
 - **HA sensors** — current speaker, active timers, wakes today, false wakes today, enrollment active
 - **Persona fully yours** — rewrite the instructions; ten OpenAI voices to build on
 - **Production hardening** — proactive session refresh before OpenAI's 60-minute cap, reconnect recovery, echo/ghost-turn guards, stop-word authority, turn-liveness watchdogs

@@ -2,6 +2,12 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.18.0 (fork)
+
+- Added the strictly read-only `get_calendar_events` voice tool for 11 approved
+  Home Assistant calendars, with explicit time bounds, a 31-day range cap,
+  20-event output limit, minimal event fields, and structured non-retry errors.
+
 ## 0.16.7 (fork)
 
 - **Wedge watchdog**: a half-open OpenAI socket (dies silently during an idle

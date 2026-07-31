@@ -14,6 +14,11 @@ from app.mcp_service import HomeAssistantMCPService
 from app.phase_emitter import TURN_LIVENESS
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
 from app.web_search_tool import get_web_search_tool_definition, create_web_search_tool_handler
+from app.calendar_tool import (
+    CALENDAR_TOOL_NAME,
+    get_calendar_tool_definition,
+    register_calendar_tool,
+)
 from app.audio_recording_service import AudioRecordingService
 from app.session_manager import SessionManager
 from app.websocket_handler import WebSocketHandler
@@ -310,6 +315,7 @@ class Application:
         self.session_manager: Optional[SessionManager] = None
         self.current_task: Optional[PipelineTask] = None
         self._pipeline_lock: Optional[asyncio.Lock] = None
+        self.ha_access_token = ""
         
     async def initialize(self) -> None:
         """Initialize all components."""
@@ -487,12 +493,12 @@ class Application:
         
         # Initialize Home Assistant MCP Service
         mcp_client = None
+        ha_access_token = os.environ.get("LONGLIVED_TOKEN") or os.environ.get("SUPERVISOR_TOKEN", "")
         try:
-            supervisor_token = os.environ.get("LONGLIVED_TOKEN") or os.environ.get("SUPERVISOR_TOKEN")
             ha_mcp_url = os.environ.get("HA_MCP_URL", "http://supervisor/core/api/mcp")
-            if supervisor_token:
+            if ha_access_token:
                 logger.info("Loading Home Assistant MCP tools...")
-                self.mcp_service = HomeAssistantMCPService(url=ha_mcp_url, access_token=supervisor_token)
+                self.mcp_service = HomeAssistantMCPService(url=ha_mcp_url, access_token=ha_access_token)
                 mcp_client = await self.mcp_service.initialize()
                 logger.info("✅ Home Assistant MCP Client initialized")
             else:
@@ -653,6 +659,7 @@ class Application:
         self.noise_reduction = noise_reduction
         self.mcp_tool_allowlist = mcp_tool_allowlist
         self.mcp_client = mcp_client
+        self.ha_access_token = ha_access_token
         self.enable_web_search = enable_web_search
         self.web_search_model = web_search_model
 
@@ -726,6 +733,9 @@ class Application:
             if self.enable_web_search:
                 all_tools.append(get_web_search_tool_definition())
 
+            # Bounded, read-only reads from the approved Home Assistant calendars.
+            all_tools.append(get_calendar_tool_definition())
+
             # Voice enrollment tool (fork): guided voice-training capture.
             all_tools.append(get_enrollment_tool_definition())
             all_tools.append(get_false_alarm_tool_definition())
@@ -750,6 +760,8 @@ class Application:
                     # with ha-mcp's 80+ tools.
                     exposed = 0
                     for function_schema in mcp_tools_schema.standard_tools:
+                        if function_schema.name == CALENDAR_TOOL_NAME:
+                            continue
                         if self.mcp_tool_allowlist and function_schema.name not in self.mcp_tool_allowlist:
                             continue
                         if openclaw_url() and function_schema.name == "ask_openclaw":
@@ -924,6 +936,11 @@ class Application:
             if openclaw_url():
                 register_openclaw_tool(self.openai_service)
                 logger.info("✅ DIRECT ask_openclaw re-registered after MCP handlers (wins)")
+            # Register after MCP because Pipecat registers every MCP handler,
+            # including schemas not exposed to the model. The native read-only
+            # implementation must remain authoritative if names ever collide.
+            register_calendar_tool(self.openai_service, self.ha_access_token)
+            logger.info("✅ Registered read-only get_calendar_events tool")
             
             logger.info("✅ New OpenAI Session created")
             return self.openai_service

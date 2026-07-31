@@ -12,6 +12,7 @@ and which options drive it. Option details live in the
 - [Voice timers](#voice-timers)
 - [False-wake flagging](#false-wake-flagging)
 - [The retrain flywheel](#the-retrain-flywheel)
+- [Calendar lookups](#calendar-lookups)
 - [Web search](#web-search)
 - [HA sensors](#ha-sensors)
 - [Persona & voices](#persona--voices)
@@ -277,6 +278,20 @@ Result for this project's own model: detection cutoff 0.43 → 0.71 across three
 passes at ~97% recall — each pass trained on the mistakes of the last. Training
 runs in ~2 hours on any spare Apple Silicon or NVIDIA machine, with the
 community [microWakeWord Trainer](https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon).
+
+---
+
+## Calendar lookups
+
+The built-in `get_calendar_events` tool reads events from the approved `personal`,
+`work`, `bigin`, `family`, `uk_holidays`, `brand`, `admin`, `installations`,
+`training`, `company_holidays`, and `quotes` calendars. It is strictly read-only:
+it cannot create, change, or delete events.
+
+Each call requires explicit timezone-aware ISO 8601 start and end timestamps. The
+end must be after the start, the range is capped at 31 days, and at most 20 events
+are returned. Results contain only summary, start, end, location when present, and
+whether the event is all-day; descriptions and unrelated calendar data are omitted.
 
 ---
 
