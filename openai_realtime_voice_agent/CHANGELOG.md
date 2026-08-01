@@ -2,6 +2,14 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.20.4 (fork)
+
+- OpenAI reconnects now succeed only after the API acknowledges `session.updated`
+  and the receive loop is alive. Failed attempts remain in recovery with capped
+  exponential backoff instead of logging a false success and leaving Jarvis deaf.
+- Recovery explicitly suppresses deferred response creation, so reconnecting
+  cannot produce unsolicited speech.
+
 ## 0.20.3 (fork)
 
 - Closing replies now answer the person naturally instead of describing the

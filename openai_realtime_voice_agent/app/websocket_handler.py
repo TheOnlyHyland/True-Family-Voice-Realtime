@@ -161,6 +161,8 @@ class ConnectionRecovery(FrameProcessor):
         "maximum duration",
     )
     RECONNECT_COOLDOWN_S = 5.0
+    RECONNECT_BACKOFF_INITIAL_S = 1.0
+    RECONNECT_BACKOFF_MAX_S = 15.0
     IDLE_UNSTICK_COOLDOWN_S = 2.0
     # Proactive refresh: reconnect BEFORE OpenAI's 60-min session cap, but only
     # while the house is genuinely quiet, so the cap practically never lands
@@ -192,6 +194,7 @@ class ConnectionRecovery(FrameProcessor):
         # mic during an active turn or the follow-up window).
         self._last_input_audio = time.monotonic()
         self._refresh_task = None
+        self._recovery_task = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -203,6 +206,9 @@ class ConnectionRecovery(FrameProcessor):
             # sends {"type":"flush"} when a follow-up window times out — not
             # reactively on mic-resume, which disturbed the VAD and caused garbage.)
             self._last_input_audio = time.monotonic()
+            if self._reconnecting:
+                logger.debug("🔇 dropping device audio during OpenAI recovery")
+                return
         if isinstance(frame, ErrorFrame) and not self._reconnecting:
             msg = str(getattr(frame, "error", "") or "")
             # Two reconnect triggers:
@@ -228,7 +234,7 @@ class ConnectionRecovery(FrameProcessor):
                 if now - self._last_attempt >= self.RECONNECT_COOLDOWN_S:
                     self._reconnecting = True
                     self._last_attempt = now
-                    asyncio.create_task(self._recover(msg))
+                    self._recovery_task = asyncio.create_task(self._recover(msg))
             else:
                 # Non-connection-death error that ENDS a turn without a reply:
                 # most importantly an OpenAI rate-limit ("Rate limit reached …"),
@@ -254,11 +260,21 @@ class ConnectionRecovery(FrameProcessor):
             return
         self._reconnecting = True
         self._last_attempt = now
-        await self._recover(reason)
+        self._recovery_task = asyncio.create_task(self._recover(reason))
+        await self._recovery_task
+
+    async def reject_wake_while_recovering(self) -> bool:
+        """Close a device wake immediately while OpenAI is unavailable."""
+        if not self._reconnecting:
+            return False
+        logger.warning("🔌 device woke during OpenAI recovery — returning it to idle")
+        await self._go_idle("wake during OpenAI recovery", force_delivery=True)
+        return True
 
     async def _recover(self, reason: str):
         t0 = time.monotonic()
         age_s = t0 - self._connected_at
+        self._reconnecting = True
         try:
             logger.warning(
                 f"🔌 OpenAI Realtime connection lost after {age_s:.0f}s "
@@ -273,16 +289,54 @@ class ConnectionRecovery(FrameProcessor):
             if reset is None:
                 logger.error("❌ service has no reset_conversation(); cannot reconnect in place")
                 return
-            await reset()
-            self._connected_at = time.monotonic()
-            logger.info(
-                f"✅ OpenAI Realtime session reconnected in {self._connected_at - t0:.1f}s "
-                f"(gap the user may have heard)"
-            )
-        except Exception as e:
-            logger.error(f"❌ OpenAI reconnect attempt failed: {e!r}")
+            attempt = 0
+            backoff_s = self.RECONNECT_BACKOFF_INITIAL_S
+            while True:
+                attempt += 1
+                self._last_attempt = time.monotonic()
+                try:
+                    await reset()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(
+                        f"❌ OpenAI reconnect attempt {attempt} failed: {e!r}; "
+                        f"retrying in {backoff_s:.1f}s"
+                    )
+                    await asyncio.sleep(backoff_s)
+                    backoff_s = min(
+                        backoff_s * 2,
+                        self.RECONNECT_BACKOFF_MAX_S,
+                    )
+                    continue
+
+                while TURN_LIVENESS.in_flight > 0:
+                    logger.info(
+                        "🔇 OpenAI session ready; waiting for %s old tool(s) before "
+                        "re-enabling responses",
+                        TURN_LIVENESS.in_flight,
+                    )
+                    await asyncio.sleep(0.1)
+                wait_for_pending_results = getattr(
+                    self._service,
+                    "wait_for_pending_tool_results",
+                    None,
+                )
+                if wait_for_pending_results is not None:
+                    await wait_for_pending_results()
+                mark_complete = getattr(self._service, "mark_recovery_complete", None)
+                if mark_complete is not None:
+                    mark_complete()
+                self._connected_at = time.monotonic()
+                logger.info(
+                    f"✅ OpenAI Realtime session ready after {attempt} attempt(s) in "
+                    f"{self._connected_at - t0:.1f}s (gap the user may have heard)"
+                )
+                return
         finally:
             self._reconnecting = False
+            if self._recovery_task is asyncio.current_task():
+                self._recovery_task = None
 
     async def _proactive_refresh_loop(self):
         """Refresh the OpenAI session BEFORE the 60-min cap, during real idle.
@@ -302,7 +356,10 @@ class ConnectionRecovery(FrameProcessor):
                 now = time.monotonic()
                 age = now - self._connected_at
                 quiet = now - self._last_input_audio
-                busy = getattr(self._service, "_current_assistant_response", None) is not None
+                busy = (
+                    getattr(self._service, "_current_assistant_response", None) is not None
+                    or TURN_LIVENESS.in_flight > 0
+                )
                 if (age >= self.REFRESH_AGE_S and quiet >= self.REFRESH_QUIET_S
                         and not busy and now - self._last_attempt >= self.RECONNECT_COOLDOWN_S):
                     self._reconnecting = True
@@ -317,12 +374,32 @@ class ConnectionRecovery(FrameProcessor):
             except Exception as e:
                 logger.warning(f"⚠️ proactive refresh loop error: {e!r}")
 
-    async def _go_idle(self, reason: str) -> None:
+    async def _go_idle(self, reason: str, force_delivery: bool = False) -> None:
         """Put the device in idle for a dead turn — via PhaseEmitter when wired."""
         if self._phase_emitter is not None:
-            await self._phase_emitter.force_idle(reason)
+            await self._phase_emitter.force_idle(
+                reason,
+                force_delivery=force_delivery,
+            )
         elif self._emit_idle is not None:
             await self._emit_idle("idle")
+
+    async def cleanup(self) -> None:
+        """Stop recovery-owned tasks before the pipeline service shuts down."""
+        current_task = asyncio.current_task()
+        tasks = [
+            task
+            for task in (self._recovery_task, self._refresh_task)
+            if task is not None and task is not current_task and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._recovery_task = None
+        self._refresh_task = None
+        self._reconnecting = False
+        await super().cleanup()
 
     async def _unstick_idle(self, reason: str):
         """Emit `idle` to the device after a turn-ending error (e.g. rate limit).
@@ -384,6 +461,7 @@ class WebSocketHandler:
         self.pipeline: Optional[Pipeline] = None
         self.runner: Optional[PipelineRunner] = None
         self.current_task: Optional[PipelineTask] = None
+        self._connection_recovery: Optional[ConnectionRecovery] = None
         # The serializer instance the transport reads through. Kept so
         # build_pipeline can wire its device-interrupt callback to the OpenAI
         # service.
@@ -496,14 +574,19 @@ class WebSocketHandler:
             before_idle=self._arm_requested_graceful_close,
         )
 
+        connection_recovery = ConnectionRecovery(
+            openai_service=openai_service,
+            emit_idle=self.broadcast_phase,
+            phase_emitter=phase_emitter,
+        )
+        self._connection_recovery = connection_recovery
+
         pipeline_components = [
             transport.input(),
             # Watch for OpenAI connection-death ErrorFrames (they travel upstream
             # to the task source, so place this upstream of the service) and
             # reconnect in place. Without it a 1011/1001 drop bricks the session.
-            (connection_recovery := ConnectionRecovery(
-                openai_service=openai_service, emit_idle=self.broadcast_phase,
-                phase_emitter=phase_emitter)),
+            connection_recovery,
             InputResampler(out_rate=PIPELINE_SAMPLE_RATE),
             input_activity_tracker,
         ]
@@ -721,6 +804,9 @@ class WebSocketHandler:
                 await connection_recovery.force_reconnect("wedge: silent after wake")
 
         async def _on_device_wake():
+            self.cancel_graceful_close_request()
+            if await connection_recovery.reject_wake_while_recovering():
+                return
             asyncio.create_task(_wedge_check(time.monotonic()))
             # va_client sends {"type":"wake"} on every wake (start_session). Mark
             # the turn boundary for the dangling-VAD guard (A): until the user
@@ -731,7 +817,6 @@ class WebSocketHandler:
             # New turn boundary: drop any pending post-tool kill so it can't
             # leak onto this fresh turn's response.
             _kill_next_response["v"] = False
-            self.cancel_graceful_close_request()
 
         # Wire the dangling-VAD guard's kill-window into the PhaseEmitter. It
         # reuses the SAME _interrupt_kill_until + _kill_racing_response machinery
@@ -1160,6 +1245,9 @@ class WebSocketHandler:
     
     async def cleanup(self):
         """Cleanup WebSocket handler resources."""
+        if self._connection_recovery is not None:
+            await self._connection_recovery.cleanup()
+
         if self.runner:
             try:
                 await self.runner.cancel()

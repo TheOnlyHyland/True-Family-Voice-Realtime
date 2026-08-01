@@ -133,6 +133,87 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         else (4.0, 24.0, 32.0, 64.0, 0.40)
     )
 
+    SESSION_READY_TIMEOUT_S = 10.0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._session_ready_event = asyncio.Event()
+        self._session_generation = 0
+        self._ready_session_generation = None
+        self._accept_session_ready = True
+        self._recovery_active = False
+        self._pending_tool_result_ids = set()
+        self._pending_tool_results_drained = asyncio.Event()
+        self._pending_tool_results_drained.set()
+
+    async def _handle_evt_session_updated(self, evt):  # type: ignore[override]
+        """Publish readiness only for the active receive-loop generation."""
+        receive_task = self._receive_task
+        current_receive_task = asyncio.current_task()
+        accepts_readiness = (
+            self._accept_session_ready
+            and receive_task is not None
+            and current_receive_task is receive_task
+        )
+        suppress_response = self._recovery_active
+        if suppress_response:
+            self._run_llm_when_api_session_ready = False
+            self._llm_needs_conversation_setup = False
+
+        await super()._handle_evt_session_updated(evt)
+
+        if suppress_response:
+            # Guard against the parent implementation changing either flag while
+            # processing session.updated. Recovery must never create a response.
+            self._run_llm_when_api_session_ready = False
+            self._llm_needs_conversation_setup = False
+
+        receive_alive = receive_task is not None and (
+            not hasattr(receive_task, "done") or not receive_task.done()
+        )
+        if (
+            accepts_readiness
+            and self._api_session_ready
+            and self._websocket is not None
+            and receive_alive
+        ):
+            self._ready_session_generation = self._session_generation
+            self._session_ready_event.set()
+
+    async def _create_response(self):  # type: ignore[override]
+        """Never speak from a tool result while connection recovery is active."""
+        if self._recovery_active:
+            self._run_llm_when_api_session_ready = False
+            logger.info("🔇 response creation suppressed during OpenAI recovery")
+            return
+        await super()._create_response()
+
+    async def _handle_context(self, context):  # type: ignore[override]
+        """Consume old tool results without allowing a post-recovery reply."""
+        matching_pending_results = {
+            message.get("tool_call_id")
+            for message in context.get_messages()
+            if isinstance(message, dict)
+            and message.get("tool_call_id") in self._pending_tool_result_ids
+            and message.get("content") != "IN_PROGRESS"
+        }
+        await super()._handle_context(context)
+        if matching_pending_results:
+            self._pending_tool_result_ids.difference_update(matching_pending_results)
+            if not self._pending_tool_result_ids:
+                self._pending_tool_results_drained.set()
+
+    async def wait_for_pending_tool_results(self) -> None:
+        """Wait until queued tool results cross the processor queues."""
+        while self._pending_tool_result_ids:
+            await self._pending_tool_results_drained.wait()
+
+    def mark_recovery_complete(self) -> None:
+        """Re-enable model responses after the ready session has no old tools."""
+        self._run_llm_when_api_session_ready = False
+        self._llm_needs_conversation_setup = False
+        self._recovery_active = False
+
     async def _handle_evt_response_done(self, evt):  # type: ignore[override]
         try:
             u = evt.response.usage
@@ -162,7 +243,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         await super()._handle_evt_response_done(evt)
 
     async def reset_conversation(self):  # type: ignore[override]
-        """Reconnect WITHOUT forcing a response on the reconnected session.
+        """Reconnect and wait for authoritative API-session readiness.
 
         pipecat's reset_conversation() (used by ConnectionRecovery on a 60-min cap
         / keepalive drop) reconnects and leaves `_llm_needs_conversation_setup =
@@ -184,12 +265,57 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         ourselves on reconnect. The live context is untouched (it's restored by the
         SessionManager on the next real turn).
         """
-        await super().reset_conversation()
+        self._accept_session_ready = False
+        self._session_ready_event.clear()
+        self._ready_session_generation = None
+        self._recovery_active = True
+        self._run_llm_when_api_session_ready = False
+        self._llm_needs_conversation_setup = False
+
+        # Inline Pipecat 0.0.97's small reset sequence so an old receive loop
+        # cannot satisfy the new connection's readiness barrier.
+        await self._disconnect()
+
+        if self._context is None:
+            from pipecat.processors.aggregators.llm_context import LLMContext
+            self._context = LLMContext()
+
+        self._llm_needs_conversation_setup = False
+        await self._process_completed_function_calls(send_new_results=False)
+
+        self._session_generation += 1
+        target_generation = self._session_generation
+        self._api_session_ready = False
+        self._accept_session_ready = True
+        await self._connect()
+
+        # Pipecat 0.0.97 converts connection failures to ErrorFrame and returns,
+        # so reset_conversation() completing does not prove that a socket exists.
+        if self._websocket is None or self._receive_task is None:
+            raise RuntimeError("OpenAI Realtime reconnect did not create a receive loop")
+
         try:
-            self._run_llm_when_api_session_ready = False
-            self._llm_needs_conversation_setup = False
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning(f"⚠️ could not clear post-reconnect response flags: {e!r}")
+            await asyncio.wait_for(
+                self._session_ready_event.wait(),
+                timeout=self.SESSION_READY_TIMEOUT_S,
+            )
+        except TimeoutError as error:
+            raise RuntimeError(
+                "OpenAI Realtime reconnect timed out before session.updated"
+            ) from error
+
+        receive_task = self._receive_task
+        if (
+            not self._api_session_ready
+            or self._ready_session_generation != target_generation
+            or self._websocket is None
+            or receive_task is None
+            or (hasattr(receive_task, "done") and receive_task.done())
+        ):
+            raise RuntimeError("OpenAI Realtime receive loop died before readiness")
+
+        self._run_llm_when_api_session_ready = False
+        self._llm_needs_conversation_setup = False
 
     # Error codes that must NOT kill the realtime session. pipecat 0.0.97's
     # _receive_task_handler does `_handle_evt_error(evt); return` on EVERY
@@ -258,6 +384,23 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         inspects the signature to pick the calling convention).
         """
         async def liveness_tracked(params):
+            original_result_callback = params.result_callback
+
+            async def generation_tracked_result(result, *, properties=None):
+                # Pipecat's callback queues a FunctionCallResultFrame and returns
+                # before the context aggregator consumes it. Track every queued
+                # result so recovery cannot miss the pre-reset boundary race.
+                self._pending_tool_result_ids.add(params.tool_call_id)
+                self._pending_tool_results_drained.clear()
+                try:
+                    await original_result_callback(result, properties=properties)
+                except Exception:
+                    self._pending_tool_result_ids.discard(params.tool_call_id)
+                    if not self._pending_tool_result_ids:
+                        self._pending_tool_results_drained.set()
+                    raise
+
+            params.result_callback = generation_tracked_result
             # Speaker gate (fork): tools listed in male_only_tools only execute
             # when the last voice-type verdict is "male". Enforced HERE — below
             # the model — so prompt tricks can't bypass it. Fails closed on

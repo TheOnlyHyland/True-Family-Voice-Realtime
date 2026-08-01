@@ -186,7 +186,7 @@ class PhaseEmitter(FrameProcessor):
         self._on_dangling_stop = on_dangling
         self._on_real_speech = on_real_speech
 
-    async def force_idle(self, reason: str = "") -> None:
+    async def force_idle(self, reason: str = "", force_delivery: bool = False) -> None:
         """Declare the current turn dead and put the device in idle.
 
         Used by the turn-death paths (rate-limit unstick, reconnect,
@@ -200,6 +200,14 @@ class PhaseEmitter(FrameProcessor):
         self._suppress_thinking = True
         if reason:
             logger.warning(f"📞 forcing phase idle ({reason[:90]})")
+        if force_delivery and self._current == "idle":
+            logger.info("📞 phase -> idle (forced repeat)")
+            if self._send_phase is not None:
+                try:
+                    await self._send_phase("idle")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to emit phase 'idle': {e}")
+            return
         await self._emit("idle")
 
     async def _emit(self, value: str) -> None:

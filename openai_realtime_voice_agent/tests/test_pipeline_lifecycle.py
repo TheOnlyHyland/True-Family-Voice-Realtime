@@ -43,13 +43,51 @@ class _FrameProcessor:
     async def push_frame(self, frame, direction=None):
         pass
 
+    async def cleanup(self):
+        pass
+
 
 class _Frame:
     pass
 
 
 class _OpenAIRealtimeLLMService:
-    pass
+    def __init__(self, *args, **kwargs):
+        self._api_session_ready = False
+        self._run_llm_when_api_session_ready = False
+        self._llm_needs_conversation_setup = True
+        self._websocket = None
+        self._receive_task = None
+        self._connect_hook: Any = None
+        self._context = None
+
+    async def _create_response(self):
+        pass
+
+    async def _handle_context(self, context):
+        self._context = context
+
+    def register_function(self, function_name, handler, start_callback=None, **kwargs):
+        self._registered_function = (function_name, handler)
+
+    async def _handle_evt_session_updated(self, _evt):
+        self._api_session_ready = True
+        if self._run_llm_when_api_session_ready:
+            self._run_llm_when_api_session_ready = False
+            await self._create_response()
+
+    async def _disconnect(self):
+        self._api_session_ready = False
+        self._websocket = None
+        self._receive_task = None
+
+    async def _connect(self):
+        if self._connect_hook is not None:
+            await self._connect_hook()
+
+    async def _process_completed_function_calls(self, send_new_results):
+        if self._context is None:
+            raise RuntimeError("missing context")
 
 
 class _Placeholder:
@@ -101,6 +139,20 @@ _stub_module(
 )
 _stub_module("pipecat.audio.utils", create_stream_resampler=lambda: _Placeholder())
 _stub_module("pipecat.services.openai.realtime.events")
+
+
+class _LLMContext:
+    def __init__(self, messages=None):
+        self._messages = messages or []
+
+    def get_messages(self):
+        return self._messages
+
+
+_stub_module(
+    "pipecat.processors.aggregators.llm_context",
+    LLMContext=_LLMContext,
+)
 
 import app  # noqa: E402
 
@@ -205,6 +257,231 @@ class _FakeWebSocketHandler:
 
 
 class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_realtime_reset_waits_for_session_updated_without_response(self):
+        service = main.SafeRealtimeLLMService()
+        service._create_response = AsyncMock()
+        deliver_ready = asyncio.Event()
+        keep_receive_loop_alive = asyncio.Event()
+
+        async def receive_loop():
+            await deliver_ready.wait()
+            await service._handle_evt_session_updated(object())
+            await keep_receive_loop_alive.wait()
+
+        async def connect():
+            service._websocket = object()
+            service._receive_task = asyncio.create_task(receive_loop())
+
+        service._connect_hook = connect
+
+        reset_task = asyncio.create_task(service.reset_conversation())
+        await asyncio.sleep(0)
+        self.assertFalse(reset_task.done())
+
+        service._run_llm_when_api_session_ready = True
+        deliver_ready.set()
+        await reset_task
+
+        self.assertTrue(service._api_session_ready)
+        self.assertTrue(service._session_ready_event.is_set())
+        self.assertFalse(service._run_llm_when_api_session_ready)
+        self.assertFalse(service._llm_needs_conversation_setup)
+        service._create_response.assert_not_awaited()
+        service._receive_task.cancel()
+        await asyncio.gather(service._receive_task, return_exceptions=True)
+
+    async def test_realtime_reset_rejects_false_socket_success(self):
+        service = main.SafeRealtimeLLMService()
+
+        with self.assertRaisesRegex(RuntimeError, "did not create a receive loop"):
+            await service.reset_conversation()
+
+    async def test_realtime_reset_times_out_without_session_updated(self):
+        service = main.SafeRealtimeLLMService()
+        service.SESSION_READY_TIMEOUT_S = 0.01
+
+        async def connect():
+            service._websocket = object()
+            service._receive_task = asyncio.create_task(asyncio.sleep(10))
+
+        service._connect_hook = connect
+
+        with self.assertRaisesRegex(RuntimeError, "timed out before session.updated"):
+            await service.reset_conversation()
+        service._receive_task.cancel()
+        await asyncio.gather(service._receive_task, return_exceptions=True)
+
+    async def test_realtime_ignores_old_receive_loop_readiness(self):
+        service = main.SafeRealtimeLLMService()
+        service._websocket = object()
+        service._receive_task = asyncio.current_task()
+        service._accept_session_ready = False
+        service._recovery_active = True
+
+        await service._handle_evt_session_updated(object())
+
+        self.assertFalse(service._session_ready_event.is_set())
+        self.assertIsNone(service._ready_session_generation)
+
+    async def test_realtime_suppresses_tool_response_during_recovery(self):
+        service = main.SafeRealtimeLLMService()
+        service._recovery_active = True
+
+        with patch.object(
+            _OpenAIRealtimeLLMService,
+            "_create_response",
+            new=AsyncMock(),
+        ) as parent_create_response:
+            await service._create_response()
+
+        parent_create_response.assert_not_awaited()
+
+    async def test_realtime_drains_pre_recovery_tool_result_before_reenabling(self):
+        service = main.SafeRealtimeLLMService()
+
+        async def tool_handler(params):
+            await params.result_callback({"status": "done"})
+
+        service.register_function("test_tool", tool_handler)
+        _, wrapped_handler = service._registered_function
+        original_result_callback = AsyncMock()
+        params = types.SimpleNamespace(
+            tool_call_id="call-1",
+            arguments={},
+            result_callback=original_result_callback,
+        )
+        service._session_generation = 1
+
+        await wrapped_handler(params)
+
+        self.assertEqual(service._pending_tool_result_ids, {"call-1"})
+        self.assertFalse(service._pending_tool_results_drained.is_set())
+
+        service._recovery_active = True
+        context = _LLMContext(
+            messages=[
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "content": {"status": "done"},
+                }
+            ]
+        )
+        await service._handle_context(context)
+        await service.wait_for_pending_tool_results()
+
+        self.assertEqual(service._pending_tool_result_ids, set())
+        self.assertTrue(service._pending_tool_results_drained.is_set())
+        original_result_callback.assert_awaited_once_with(
+            {"status": "done"},
+            properties=None,
+        )
+
+    async def test_connection_recovery_retries_until_ready(self):
+        service = types.SimpleNamespace(
+            reset_conversation=AsyncMock(
+                side_effect=[
+                    RuntimeError("first failure"),
+                    RuntimeError("second failure"),
+                    None,
+                ]
+            )
+        )
+        phase_emitter = types.SimpleNamespace(force_idle=AsyncMock())
+        recovery = websocket_handler.ConnectionRecovery(
+            openai_service=service,
+            phase_emitter=phase_emitter,
+        )
+        connected_at = recovery._connected_at
+        delays = []
+
+        async def record_sleep(delay):
+            delays.append(delay)
+
+        with patch.object(websocket_handler.asyncio, "sleep", side_effect=record_sleep):
+            await recovery._recover("test disconnect")
+
+        self.assertEqual(service.reset_conversation.await_count, 3)
+        self.assertEqual(delays, [1.0, 2.0])
+        self.assertGreaterEqual(recovery._connected_at, connected_at)
+        self.assertFalse(recovery._reconnecting)
+        phase_emitter.force_idle.assert_awaited_once()
+
+    async def test_connection_recovery_caps_retry_backoff(self):
+        service = types.SimpleNamespace(
+            reset_conversation=AsyncMock(
+                side_effect=[
+                    RuntimeError("failure 1"),
+                    RuntimeError("failure 2"),
+                    RuntimeError("failure 3"),
+                    RuntimeError("failure 4"),
+                    RuntimeError("failure 5"),
+                    RuntimeError("failure 6"),
+                    None,
+                ]
+            )
+        )
+        recovery = websocket_handler.ConnectionRecovery(openai_service=service)
+        delays = []
+
+        async def record_sleep(delay):
+            delays.append(delay)
+
+        with patch.object(websocket_handler.asyncio, "sleep", side_effect=record_sleep):
+            await recovery._recover("test prolonged outage")
+
+        self.assertEqual(delays, [1.0, 2.0, 4.0, 8.0, 15.0, 15.0])
+        self.assertFalse(recovery._reconnecting)
+
+    async def test_connection_recovery_rejects_wake_until_ready(self):
+        phase_emitter = types.SimpleNamespace(force_idle=AsyncMock())
+        recovery = websocket_handler.ConnectionRecovery(
+            openai_service=types.SimpleNamespace(),
+            phase_emitter=phase_emitter,
+        )
+
+        self.assertFalse(await recovery.reject_wake_while_recovering())
+        phase_emitter.force_idle.assert_not_awaited()
+
+        recovery._reconnecting = True
+        self.assertTrue(await recovery.reject_wake_while_recovering())
+        phase_emitter.force_idle.assert_awaited_once_with(
+            "wake during OpenAI recovery",
+            force_delivery=True,
+        )
+
+    async def test_connection_recovery_drops_audio_until_ready(self):
+        recovery = websocket_handler.ConnectionRecovery(
+            openai_service=types.SimpleNamespace()
+        )
+        recovery._refresh_task = Mock()
+        recovery._reconnecting = True
+        recovery.push_frame = AsyncMock()
+
+        await recovery.process_frame(
+            websocket_handler.InputAudioRawFrame(),
+            None,
+        )
+
+        recovery.push_frame.assert_not_awaited()
+
+    async def test_connection_recovery_cleanup_cancels_owned_tasks(self):
+        recovery = websocket_handler.ConnectionRecovery(
+            openai_service=types.SimpleNamespace()
+        )
+        recovery._reconnecting = True
+        recovery_any = cast(Any, recovery)
+        recovery_task = asyncio.create_task(asyncio.sleep(10))
+        refresh_task = asyncio.create_task(asyncio.sleep(10))
+        recovery_any._recovery_task = recovery_task
+        recovery_any._refresh_task = refresh_task
+
+        await recovery.cleanup()
+
+        self.assertTrue(recovery_task.cancelled())
+        self.assertTrue(refresh_task.cancelled())
+        self.assertFalse(recovery._reconnecting)
+
     async def test_control_broadcast_is_compact_and_keeps_socket_open(self):
         class WebSocket:
             def __init__(self):
