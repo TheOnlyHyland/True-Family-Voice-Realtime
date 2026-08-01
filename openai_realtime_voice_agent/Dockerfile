@@ -13,6 +13,7 @@ FROM ${BUILD_FROM}
 
 ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONSAFEPATH=1 \
     PIP_NO_CACHE_DIR=1
 
 # Runtime deps + minimal build insurance. Most Python deps install from wheels;
@@ -52,5 +53,5 @@ RUN mkdir -p /opt/voiceprint \
 COPY root/ /
 RUN chmod a+x /run.sh
 
-WORKDIR /
+WORKDIR /app
 CMD ["/run.sh"]

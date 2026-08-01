@@ -2,6 +2,11 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.20.6 (fork)
+
+- Enable Python safe-path mode and use a non-root working directory so NLTK can
+  import standard-library modules after its upstream import-security update.
+
 ## 0.20.5 (fork)
 
 - `max_context_messages` now retains complete user-led turns instead of slicing
