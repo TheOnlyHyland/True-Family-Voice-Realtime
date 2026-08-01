@@ -19,13 +19,13 @@ Two places hold configuration:
 |---|---|---|
 | `openai_api_key` | *(empty)* | Your OpenAI key (`sk-...`), created at platform.openai.com with billing enabled. Everything — listening, thinking, speaking, web search — runs on this key. **Required.** |
 | `instructions` | English voice-tuned prompt | The system prompt: personality, language, house rules. Write it like you'd brief a person. See [Persona & voices](features.md#persona--voices) for what it can and can't change. |
-| `transcription_language` | *(empty)* | Two-letter ISO code (`en`, `nl`, `de`, …). Setting it pins the language and logs what you said as `🗣️ user:` lines — very handy for debugging. Empty = auto-detect, no user transcript. |
+| `transcription_language` | *(empty)* | Two-letter ISO code (`en`, `nl`, `de`, …). Setting it pins the private in-memory transcript language; empty auto-detects. User transcripts are not logged. |
 
 ## 🗣️ Model & voice
 
 | Option | Default | Purpose / when to change |
 |---|---|---|
-| `openai_model` | `gpt-realtime-2` | The speech-to-speech model. Choices: `gpt-realtime-2` (newest, smartest), `gpt-realtime-1.5`, `gpt-realtime-mini` (cheaper, less capable), `gpt-realtime`, or `custom`. |
+| `openai_model` | `gpt-realtime-2.1` | The speech-to-speech model. Choices include `gpt-realtime-2.1` (newest), `gpt-realtime-2`, `gpt-realtime-1.5`, `gpt-realtime-mini`, `gpt-realtime`, or `custom`. |
 | `openai_model_custom` | *(hidden)* | Any valid Realtime model id, used when `openai_model` is `custom`. Expert escape hatch. |
 | `openai_voice` | `marin` | The voice it speaks with. `marin`/`cedar` are the newest and most natural; also `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`. Restart the add-on after changing — a running conversation keeps its voice. |
 | `openai_voice_custom` | *(hidden)* | Any valid OpenAI voice name, used when `openai_voice` is `custom`. |
@@ -81,11 +81,11 @@ Two places hold configuration:
 | Option | Default | Purpose / when to change |
 |---|---|---|
 | `websocket_port` | `8080` | The port the Voice PE connects to. Must match the `va_url` in the device firmware. Change only on a port clash (and for second devices — see [multi-device](getting-started.md#part-6--multiple-devices)); `8081` is used by dev builds. |
-| `session_reuse_timeout_seconds` | `300` | If the device reconnects within this window (Wi-Fi blip, add-on restart), the conversation resumes where it left off. `0` = always start fresh. |
-| `max_context_messages` | `12` | How many recent exchanges the session keeps. More = better in-conversation memory, but every answer re-bills the whole history — long chats get expensive and can hit rate limits. `0` = unlimited. |
-| `transcription_model` | `gpt-4o-transcribe` | Writes your speech into the log when `transcription_language` is set. Does **not** affect understanding — the main model hears your audio natively. Also: `gpt-realtime-whisper`, `gpt-4o-mini-transcribe`, `whisper-1`. |
+| `session_reuse_timeout_seconds` | `300` | If the device reconnects within this window after a Wi-Fi blip, the conversation resumes. A full add-on restart starts fresh. |
+| `max_context_messages` | `12` | Complete user-led turns retained across the hourly OpenAI reconnect; tool calls and results stay together. `0` disables managed history. A positive value requires `semantic_vad`. |
+| `transcription_model` | `gpt-4o-transcribe` | Creates private bounded text for reconnect replay. Does **not** affect understanding — the main model hears your audio natively. Also: `gpt-realtime-whisper`, `gpt-4o-mini-transcribe`, `whisper-1`. |
 | `transcription_model_custom` | *(hidden)* | Custom transcription model id. |
-| `turn_detection_type` | *(unset)* | Leave unset: `semantic_vad` (understands when your sentence is finished) is the hardwired default. `server_vad` is the legacy silence-timer method, kept as an escape hatch, tuned by the three fields below. |
+| `turn_detection_type` | *(unset)* | Leave unset: `semantic_vad` is required for managed bounded history. Selecting legacy `server_vad` automatically disables managed history with a warning. |
 | `vad_threshold` | *(unset)* | server_vad only: loudness to count as speech, 0–1 (default 0.5). Higher = fewer false triggers from background noise. |
 | `vad_prefix_padding_ms` | *(unset)* | server_vad only: audio kept from just before speech was detected so your first word isn't clipped (default 300). |
 | `vad_silence_duration_ms` | *(unset)* | server_vad only: how long a silence ends your turn (default 800). Raise if you get cut off while pausing. |

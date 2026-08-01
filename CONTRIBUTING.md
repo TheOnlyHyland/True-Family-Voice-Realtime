@@ -51,7 +51,7 @@ tested, explained**.
 | `examples/openclaw-bridge/` | Reference agent bridge (Node) |
 
 Firmware lives in
-[voicepe-realtime-firmware](https://github.com/TristanBrotherton/voicepe-realtime-firmware) —
+[True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware) —
 same rules, plus: firmware PRs **must** state which device revision you flashed
 and that wake word, timers, and enrollment still work.
 

@@ -41,7 +41,7 @@ Longer versions, with the how-it-works behind each: **[Stories](docs/stories.md)
 
 ## Features
 
-- **OpenAI Realtime speech-to-speech** — `gpt-realtime-2` by default, any model id via custom
+- **OpenAI Realtime speech-to-speech** — `gpt-realtime-2.1` by default, any model id via custom
 - **Native Home Assistant control** via the official MCP Server integration — scoped to exactly the entities you expose
 - **Custom wake word** — "Hey Leonard" ships as the default (trained by this project); switch to Hey Jarvis / Okay Nabu from a dropdown in HA, or [train your own](docs/features.md#wake-words)
 - **Speaker recognition** — local voice-print identification with guided voice enrollment (say *"train my voice"*)

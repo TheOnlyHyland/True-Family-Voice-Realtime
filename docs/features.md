@@ -26,7 +26,7 @@ and which options drive it. Option details live in the
 **"Hey Leonard" ships as the default wake word** — a custom microWakeWord model
 trained by this project on real household voices (it's the worked example of the
 [retrain flywheel](#the-retrain-flywheel) below; the model lives in the firmware
-repo's [`models/`](https://github.com/TristanBrotherton/voicepe-realtime-firmware/tree/main/models)
+repo's [`models/`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/tree/main/models)
 directory).
 
 Detection runs entirely **on-device** — no audio leaves the Voice PE until a wake
@@ -374,7 +374,7 @@ LANGUAGE / STYLE / BEHAVIOR structure as the default prompt.
 ## On the device
 
 Firmware niceties worth knowing about (all in the
-[firmware repo](https://github.com/TristanBrotherton/voicepe-realtime-firmware)):
+[firmware repo](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)):
 
 - **Thin audio client** (`va_client`): raw 16 kHz mic streaming up, 24 kHz reply
   playback down, jitter buffering, mic pre-roll, and reconnect logic. There is no

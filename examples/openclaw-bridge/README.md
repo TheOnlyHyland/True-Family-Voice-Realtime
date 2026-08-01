@@ -21,8 +21,8 @@ straight from a clone of this repo — updating the bridge is then just
 they survive pulls and can never be committed.
 
 ```bash
-git clone https://github.com/TristanBrotherton/voicepe-realtime.git
-cd voicepe-realtime/examples/openclaw-bridge
+git clone https://github.com/TheOnlyHyland/True-Family-Voice-Realtime.git
+cd True-Family-Voice-Realtime/examples/openclaw-bridge
 
 # 1. Secrets — the URL path is the lock on the ask endpoint
 echo "/ask-$(openssl rand -hex 12)" > .ask-path
@@ -133,7 +133,7 @@ curl -s -X POST "http://127.0.0.1:3338$ASK" -H "Content-Type: application/json" 
 ## Updating
 
 ```bash
-cd voicepe-realtime && git pull
+cd True-Family-Voice-Realtime && git pull
 # macOS
 launchctl kickstart -k gui/$(id -u)/openclaw.voicepe-bridge
 # Linux

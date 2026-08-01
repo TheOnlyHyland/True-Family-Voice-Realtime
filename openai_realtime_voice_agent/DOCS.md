@@ -1,7 +1,7 @@
 # Voice PE Realtime — Add-on Documentation
 
 This add-on runs an **OpenAI Realtime** voice session (default model
-`gpt-realtime-2`) and bridges it to Home Assistant control, web search, voice
+`gpt-realtime-2.1`) and bridges it to Home Assistant control, web search, voice
 timers, speaker recognition, and persistent voice-taught memory. It is the
 backend half of a two-part project; the front half is custom **firmware for the
 Home Assistant Voice PE** device (see
@@ -16,7 +16,7 @@ Voice PE device  ──WebSocket──▶  this add-on  ──▶  OpenAI Realti
 
 **Full documentation** lives in the project repository — feature guides, the
 complete option reference, agent integration, and FAQ:
-<https://github.com/TristanBrotherton/voicepe-realtime/tree/main/docs>.
+<https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/tree/main/docs>.
 This page covers setup and day-to-day essentials.
 
 ---
@@ -25,8 +25,8 @@ This page covers setup and day-to-day essentials.
 
 1. In Home Assistant go to **Settings → Add-ons → Add-on Store**.
 2. Top-right **⋮ → Repositories**, add:
-   `https://github.com/TristanBrotherton/voicepe-realtime`
-3. Find **OpenAI Realtime 2 Voice Agent** in the store and click **Install**.
+   `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
+3. Find **True Family Voice Realtime** in the store and click **Install**.
    (There is no prebuilt image — Home Assistant builds it locally the first time,
    which takes a few minutes.)
 4. Open the add-on's **Configuration** tab to set it up (next sections).
@@ -34,7 +34,7 @@ This page covers setup and day-to-day essentials.
 **One add-on instance serves one Voice PE device.** For multiple devices, run one
 instance per device (a local-add-on copy with its own `slug`, `name` and
 `websocket_port`) — see the
-[Getting Started guide](https://github.com/TristanBrotherton/voicepe-realtime/blob/main/docs/getting-started.md#part-6--multiple-devices).
+[Getting Started guide](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/getting-started.md#part-6--multiple-devices).
 
 ## 2. Get an OpenAI API key
 
@@ -80,16 +80,16 @@ option has plain-language inline help.
 
 | Option | Default | Note |
 |---|---|---|
-| `openai_model` | `gpt-realtime-2` | newest speech-to-speech model |
+| `openai_model` | `gpt-realtime-2.1` | newest speech-to-speech model |
 | `openai_voice` | `marin` | `marin`/`cedar` are the newest voices |
-| `transcription_language` | *(blank)* | set your ISO code (e.g. `nl`): locks the language + logs the user transcript |
+| `transcription_language` | *(blank)* | auto-detects for bounded context replay; set an ISO code (e.g. `nl`) to lock it |
 | `instructions` | *(English default)* | the system prompt; swap the LANGUAGE line for your language |
 | `follow_up_listen_seconds` | `8` | mic stays open this long so you can answer back |
 | `follow_up_open_delay_ms` | `700` | echo guard before the follow-up mic opens; lower = snappier but risks ghost turns |
 | `wake_open_delay_ms` | `700` | the same echo guard right after the wake chime |
 | `vad_eagerness` | `low` | waits longest before deciding you're done talking |
 | `playback_prebuffer_ms` | `150` | raise to ~250 if you hear crackle; 0 = play immediately |
-| `max_context_messages` | `12` | bounds per-turn token cost |
+| `max_context_messages` | `12` | complete user-led turns retained; `0` disables managed reconnect history |
 | `enable_web_search` | `true` | online lookups; set `false` to disable |
 | `web_search_model` | `gpt-5.5` | best-quality search model; mini/nano are cheaper |
 
@@ -99,7 +99,7 @@ leave them unset unless you have a specific reason.
 
 The **complete option reference** (every option, purpose, default, when to change
 it) is in the
-[Configuration Reference](https://github.com/TristanBrotherton/voicepe-realtime/blob/main/docs/configuration.md).
+[Configuration Reference](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/configuration.md).
 
 ## 5. Web search
 
@@ -148,7 +148,7 @@ Options: `enrollment_phrase`, `enrollment_tts_voice`, `wake_sound_entity`
 (auto-mutes the wake chime during sessions).
 
 Full guide:
-[Speaker recognition & voice enrollment](https://github.com/TristanBrotherton/voicepe-realtime/blob/main/docs/features.md#speaker-recognition--voice-enrollment).
+[Speaker recognition & voice enrollment](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/features.md#speaker-recognition--voice-enrollment).
 
 ## 8. Voice-instructed memory
 
@@ -180,7 +180,7 @@ token; the add-on runs on the host network, so the token is the lock.
 
 The integration is agent-agnostic — any agent behind a small bridge works. Full
 contracts and examples:
-[Agent Integration](https://github.com/TristanBrotherton/voicepe-realtime/blob/main/docs/agent-integration.md).
+[Agent Integration](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/agent-integration.md).
 
 ## 10. False-wake flagging & HA sensors
 
@@ -188,7 +188,7 @@ Every wake's opening audio is archived locally (auto-pruned, newest 500). Flag a
 false trigger by saying *"that was a false alarm"*, **double-pressing the center
 button**, or automatically when a wake is silenced without speech. Labeled
 captures become hard negatives for wake-word retraining — see the
-[retrain flywheel](https://github.com/TristanBrotherton/voicepe-realtime/blob/main/docs/features.md#the-retrain-flywheel).
+[retrain flywheel](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/features.md#the-retrain-flywheel).
 
 Set **`instance_name`** (e.g. `kitchen`) to publish
 `sensor.voicepe_kitchen_speaker`, `_active_timers`, `_wakes_today`,
@@ -197,8 +197,7 @@ dashboards and automations.
 
 ## 11. Reading the logs
 
-The add-on log shows each turn: `🗣️ user:` (when transcription language is set),
-`🤖 assistant:` (the reply text), `📞 phase ->` (device state), tool calls, and
+The add-on log shows `🤖 assistant:` (reply text), `📞 phase ->` (device state), tool calls, and
 `🔌 …reconnecting` / `✅ reconnected` on a connection recovery. View it on the add-on
 **Log** tab.
 
@@ -224,12 +223,12 @@ thin client (it streams mic audio here and plays the reply). That firmware:
 
 - is **specific to the Home Assistant Voice PE** hardware (ESP32-S3 + XMOS), and
 - lives in its own **public** repository:
-  **[TristanBrotherton/voicepe-realtime-firmware](https://github.com/TristanBrotherton/voicepe-realtime-firmware)**.
+  **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**.
 
 You flash it once via a tiny per-device "stub" in ESPHome Builder; after that,
 firmware updates are **one click** — no tokens, no copy-pasting. The full
 from-scratch guide (flashing + adopting + first conversation) is the
-[Getting Started guide](https://github.com/TristanBrotherton/voicepe-realtime/blob/main/docs/getting-started.md).
+[Getting Started guide](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/getting-started.md).
 
 ## Credits
 

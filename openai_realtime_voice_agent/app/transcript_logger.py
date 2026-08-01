@@ -1,10 +1,9 @@
-"""Log the conversation transcript (assistant + user) into the add-on log.
+"""Log the assistant transcript into the add-on log.
 
 WHY: with gpt-realtime the model hears the user's audio natively and bursts the
 whole spoken reply as audio — the only window into *what it actually said* used to
 be the OpenAI tool-call arguments. This processor surfaces the assistant's spoken
-text (and, when input transcription is enabled, the user's transcript) as plain
-INFO lines so the add-on log alone explains a turn.
+text as a plain INFO line so the add-on log explains what the device said.
 
 How the text reaches us (verified against pipecat 0.0.97's *real*
 `pipecat.services.openai.realtime.llm.OpenAIRealtimeLLMService` — NOT the older
@@ -19,18 +18,8 @@ How the text reaches us (verified against pipecat 0.0.97's *real*
     These flow DOWNSTREAM out of the service, so the "assistant" tap sits AFTER
     it in the pipeline.
 
-  - User transcript: `conversation.item.input_audio_transcription.completed`
-    pushes a `TranscriptionFrame` — but UPSTREAM (toward the input, so the user
-    context aggregator can consume it) and ONLY when input transcription is
-    configured (main.py: transcription is None unless TRANSCRIPTION_LANGUAGE is
-    set). A tap placed AFTER the service never sees it; the "user" tap therefore
-    sits BEFORE the service (between the user aggregator and the LLM).
-
-Because the two transcripts travel in opposite directions past the service, no
-single position sees both — so the pipeline wires TWO instances of this class,
-one per role (see websocket_handler.build_pipeline). It is pure instrumentation:
-it never transforms or drops a frame. (Listed for removal under CLAUDE.md
-roadmap #5 once the system is stable.)
+User transcripts are intentionally not logged. They are retained only in the
+bounded in-memory conversation window for reconnect replay.
 """
 import logging
 
@@ -39,7 +28,6 @@ from pipecat.frames.frames import (
     TTSTextFrame,
     LLMTextFrame,
     LLMFullResponseEndFrame,
-    TranscriptionFrame,
 )
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
@@ -47,12 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class TranscriptLogger(FrameProcessor):
-    """Forward-only processor that logs assistant and/or user transcript lines.
-
-    Args:
-        capture: which side to log — "assistant" (TTS/LLM reply text, place AFTER
-            the LLM), "user" (TranscriptionFrame, place BEFORE the LLM), or "both".
-    """
+    """Forward-only processor that logs assistant transcript lines."""
 
     def __init__(self, capture: str = "both", **kwargs):
         super().__init__(**kwargs)
@@ -74,11 +57,5 @@ class TranscriptLogger(FrameProcessor):
                 self._assistant_buf = []
                 if text:
                     logger.info(f"🤖 assistant: {text}")
-
-        if self._capture in ("user", "both"):
-            if isinstance(frame, TranscriptionFrame):
-                text = (frame.text or "").strip()
-                if text:
-                    logger.info(f"🗣️ user: {text}")
 
         await self.push_frame(frame, direction)

@@ -26,15 +26,15 @@ configuration:
     name: "🔑 Basis · Spreektaal (bijv. nl, en, de)"
     description: >-
       Tweeletterige code van de taal die je tegen het apparaat spreekt. Dit
-      voorkomt dat de assistent naar een andere taal afdwaalt, ÉN schrijft wat
-      jij zei in het add-on-log (de 🗣️-regels — handig om te zien wat hij
-      verstond). Leeg = automatisch detecteren (geen transcript in het log).
+      verbetert de nauwkeurigheid en voorkomt dat de assistent naar een andere
+      taal afdwaalt. Leeg = automatisch detecteren. Gebruikerstranscripten
+      blijven alleen tijdelijk in begrensd geheugen en worden niet gelogd.
 
   # --- 🗣️ Model & stem ---
   openai_model:
     name: "🗣️ Model & stem · Model"
     description: >-
-      Het OpenAI-model dat luistert en praat. gpt-realtime-2 (standaard) is
+      Het OpenAI-model dat luistert en praat. gpt-realtime-2.1 (standaard) is
       het nieuwste en slimste. gpt-realtime-mini is merkbaar goedkoper maar
       minder slim. Wil je een model dat er niet tussen staat? Kies "custom"
       en zet onderaan deze pagina "Toon ongebruikte optionele
@@ -179,24 +179,23 @@ configuration:
   session_reuse_timeout_seconds:
     name: "⚙️ Geavanceerd · Gesprek hervatten binnen (seconden)"
     description: >-
-      Verbindt het apparaat binnen dit aantal seconden opnieuw (wifi-hapering,
-      add-on-herstart), dan gaat het gesprek verder waar het was. 300 (5 min)
-      is een goede standaard; 0 = altijd opnieuw beginnen.
+      Verbindt het apparaat binnen dit aantal seconden opnieuw na een
+      wifi-hapering, dan gaat het gesprek verder waar het was. Een volledige
+      add-on-herstart begint opnieuw. 300 (5 min) is een goede standaard.
   max_context_messages:
     name: "⚙️ Geavanceerd · Gespreksgeheugen (berichten)"
     description: >-
-      Hoeveel recente uitwisselingen de assistent binnen een gesprek onthoudt.
-      Meer = beter geheugen, maar elk antwoord rekent de hele historie opnieuw
-      af, dus lange gesprekken worden duurder en kunnen tegen OpenAI-limieten
-      aanlopen. 12 is een goede balans; 0 = onbeperkt.
+      Hoeveel volledige, door de gebruiker gestarte beurten de assistent
+      onthoudt. Toolaanroepen en resultaten blijven bij elkaar. Meer = beter
+      geheugen, maar ook hogere kosten. 12 is een goede balans; 0 schakelt
+      beheerde historie uit en begint opnieuw na een OpenAI-sessiewissel.
   transcription_model:
     name: "⚙️ Geavanceerd · Transcriptmodel"
     description: >-
-      Alleen gebruikt als bij Basis een spreektaal is ingesteld. Dit model
-      schrijft jouw spraak als tekst in het log — het beïnvloedt NIET hoe de
-      assistent je verstaat (die hoort je echte stem). gpt-4o-transcribe
-      (standaard) is het nauwkeurigst. Voor een ander model: kies "custom" en
-      zet onderaan "Toon ongebruikte optionele configuratie-opties" aan.
+      Maakt begrensde tekst voor gesprekscontinuïteit na OpenAI's uurlijkse
+      herverbinding. Het beïnvloedt NIET hoe de assistent je verstaat en de
+      tekst wordt niet gelogd. gpt-4o-transcribe is de standaard. Kies voor
+      een ander model "custom" en toon ongebruikte optionele opties.
   transcription_model_custom:
     name: "⚙️ Geavanceerd · Transcriptmodel (custom)"
     description: >-
@@ -207,8 +206,8 @@ configuration:
     description: >-
       Hoe het einde van je vraag wordt herkend. Normaal NIET instellen: de
       assistent begrijpt dan zelf wanneer je zin af is (semantic_vad).
-      "server_vad" is de oude stiltetimer-methode, afgesteld met de drie
-      velden hieronder — alleen bewaard als noodluik.
+      "server_vad" is de oude stiltetimer-methode en schakelt beheerd
+      gespreksgeheugen automatisch uit.
   vad_threshold:
     name: "⚙️ Geavanceerd · server_vad: geluidsdrempel"
     description: >-

@@ -33,8 +33,8 @@ Home Assistant Voice PE          Home Assistant (your box)             Cloud
 
 1. In Home Assistant: **Settings → Add-ons → Add-on Store**.
 2. Top-right **⋮ → Repositories** → paste and add:
-   `https://github.com/TristanBrotherton/voicepe-realtime`
-3. Find **OpenAI Realtime 2 Voice Agent** in the store and click **Install**.
+   `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
+3. Find **True Family Voice Realtime** in the store and click **Install**.
    Home Assistant builds it locally — this takes a few minutes the first time.
 
 > **One add-on instance serves one device.** For a second Voice PE, see
@@ -98,7 +98,7 @@ client that streams audio to the add-on. You set it up **once** via a tiny "stub
 config; after that, firmware updates are one click (no copy-pasting).
 
 The firmware lives in its own repo:
-**[TristanBrotherton/voicepe-realtime-firmware](https://github.com/TristanBrotherton/voicepe-realtime-firmware)**.
+**[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**.
 
 ### 2.1 Install the ESPHome Builder add-on
 
@@ -154,8 +154,8 @@ Two of these confuse people, so to be clear:
 
 1. In ESPHome Builder, **Edit** the adopted device and **replace its entire YAML** with
    a ready-made stub from the firmware repo:
-   - DHCP: [`esphome-builder.dhcp.yaml`](https://github.com/TristanBrotherton/voicepe-realtime-firmware/blob/main/esphome-builder.dhcp.yaml)
-   - Fixed IP: [`esphome-builder.static-ip.yaml`](https://github.com/TristanBrotherton/voicepe-realtime-firmware/blob/main/esphome-builder.static-ip.yaml)
+   - DHCP: [`esphome-builder.dhcp.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/main/esphome-builder.dhcp.yaml)
+   - Fixed IP: [`esphome-builder.static-ip.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/main/esphome-builder.static-ip.yaml)
 
    Set `name` and `friendly_name`, and **keep** the `packages:` / `dashboard_import:`
    lines — those are what pull the full firmware from the repo. Keep the device
@@ -189,7 +189,7 @@ That's it — the device boots, connects to the add-on, and you're ready to talk
 
 **If something's off, check the logs:**
 
-- Add-on **Log** tab: `🗣️ user:` / `🤖 assistant:` lines, tool calls, and
+- Add-on **Log** tab: `🤖 assistant:` lines, tool calls, and
   `🔌 reconnecting` / `✅ reconnected`.
 - Device logs: ESPHome Builder → your device → **Logs**.
 - Tools missing? Re-check Part 1.3. A 401/403 in the log means set `longlived_token`

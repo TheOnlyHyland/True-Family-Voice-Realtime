@@ -2,6 +2,40 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.20.5 (fork)
+
+- `max_context_messages` now retains complete user-led turns instead of slicing
+  arbitrary local messages. Expired turns are deleted from OpenAI before the next
+  response, with tool calls and matching outputs kept indivisible.
+- Recent complete turns are silently replayed after the hourly Realtime reconnect
+  without generating speech or rerunning tools. If replay cannot be proven safe,
+  the replacement session starts with an empty conversation.
+- Input transcription now runs with automatic language detection when context
+  bounding is enabled. User transcripts remain only in the bounded in-memory
+  window and are no longer written to the add-on log.
+- Bounded history requires `semantic_vad`. Existing `server_vad` configurations
+  remain startable by automatically disabling managed history with a warning.
+- Tool calls now use generation-fenced scheduled, running, and result-drain
+  barriers. A reconnect, replay, or explicit stop cannot dispatch an abandoned
+  handler or emit an orphaned tool continuation.
+- Explicit stop now removes the interrupted turn in place, quarantines every
+  remaining item in that response, suppresses its audio and text, confirms its
+  server-side deletion, and waits for response-cancel settlement before allowing
+  the replacement response. The replacement wake and microphone audio are not
+  discarded, including when a tool was pending.
+- Generic Realtime receive-loop errors now enter explicit reconnect recovery;
+  blank or failed managed transcripts and non-replayable terminal turns fail
+  fresh instead of leaving local and server history divergent.
+- Response IDs, cancel event IDs, input-clear acknowledgements, Pipecat function
+  ownership, and assistant response-end processing are generation-fenced so a
+  delayed old response cannot complete or contaminate a replacement turn.
+- Started tool actions finish atomically while interrupted callbacks are
+  swallowed. Tool execution is serialized, with bounded admission for a newer
+  action instead of allowing contradictory mutations to interleave.
+- Dangling server-VAD boundaries now fail closed through an immediate in-place
+  Realtime reconnect. Old-session audio, items, transcripts, tools, and response
+  completions remain suppressed until the replacement session is ready.
+
 ## 0.20.4 (fork)
 
 - OpenAI reconnects now succeed only after the API acknowledges `session.updated`

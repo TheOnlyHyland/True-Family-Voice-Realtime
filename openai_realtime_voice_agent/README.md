@@ -1,4 +1,4 @@
-# OpenAI Realtime 2 Voice Agent
+# True Family Voice Realtime
 
 Talk to your home with **OpenAI's Realtime** speech-to-speech models. This Home
 Assistant add-on runs the realtime voice session and bridges it to Home Assistant
@@ -15,7 +15,7 @@ drop-in for the stock HA voice pipeline.
 
 > **You need both halves.** This add-on does nothing without the **Voice PE firmware**
 > that streams audio to it →
-> **[TristanBrotherton/voicepe-realtime-firmware](https://github.com/TristanBrotherton/voicepe-realtime-firmware)**.
+> **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**.
 
 ## What it does
 
@@ -39,16 +39,16 @@ drop-in for the stock HA voice pipeline.
 ## Quick start
 
 1. Add this repository to Home Assistant (Settings → Add-ons → Add-on Store → ⋮ →
-   **Repositories**): `https://github.com/TristanBrotherton/voicepe-realtime`
-2. Install **OpenAI Realtime 2 Voice Agent** and open its **Configuration** tab.
+   **Repositories**): `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
+2. Install **True Family Voice Realtime** and open its **Configuration** tab.
 3. Paste your **OpenAI API key**, install the HA **MCP Server** integration, expose
    a few entities to Assist, and **Start** the add-on.
 4. Flash the **Voice PE firmware** from
-   **[TristanBrotherton/voicepe-realtime-firmware](https://github.com/TristanBrotherton/voicepe-realtime-firmware)**
+   **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**
    (one-click adopt-and-update in ESPHome Builder).
 
 Setup steps are on the **Documentation** tab (`DOCS.md`); the full guides live at
-**<https://github.com/TristanBrotherton/voicepe-realtime>**.
+**<https://github.com/TheOnlyHyland/True-Family-Voice-Realtime>**.
 
 ## Credits
 

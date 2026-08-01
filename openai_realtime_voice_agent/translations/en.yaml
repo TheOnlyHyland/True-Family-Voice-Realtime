@@ -25,16 +25,16 @@ configuration:
   transcription_language:
     name: "🔑 Basics · Spoken language (e.g. nl, en, de)"
     description: >-
-      Two-letter code of the language you speak to it. Setting it keeps the
-      assistant from drifting into other languages, AND writes what you said
-      into the add-on log (the 🗣️ lines — handy to check what it heard).
-      Leave empty for auto-detect (no user transcript in the log).
+      Two-letter code of the language you speak to it. Setting it improves
+      transcript accuracy and keeps the assistant from drifting into other
+      languages. Leave empty for auto-detect. User transcripts are retained
+      only in bounded memory for conversation replay and are never logged.
 
   # --- 🗣️ Model & voice ---
   openai_model:
     name: "🗣️ Model & voice · Model"
     description: >-
-      The OpenAI model that listens and talks. gpt-realtime-2 (default) is the
+      The OpenAI model that listens and talks. gpt-realtime-2.1 (default) is the
       newest and smartest. gpt-realtime-mini is noticeably cheaper but less
       capable. Want a model that's not listed? Pick "custom", then enable
       "Show unused optional configuration options" at the bottom of this page
@@ -192,24 +192,25 @@ configuration:
   session_reuse_timeout_seconds:
     name: "⚙️ Advanced · Conversation resume window (seconds)"
     description: >-
-      If the device reconnects within this many seconds (Wi-Fi blip, add-on
-      restart), the conversation continues where it left off. 300 (5 min) is
-      a good default; 0 = always start fresh.
+      If the device reconnects within this many seconds after a Wi-Fi blip, the
+      conversation continues where it left off. A full add-on restart starts
+      fresh. 300 (5 min) is a good default; 0 = always start fresh.
   max_context_messages:
     name: "⚙️ Advanced · Conversation memory size"
     description: >-
-      How many recent exchanges the assistant remembers within a
-      conversation. More = better memory, but every answer re-bills the whole
-      history, so long chats get expensive and can hit OpenAI rate limits.
-      12 is a good balance; 0 = unlimited.
+      How many complete user-led turns the assistant remembers. Tool calls and
+      their results stay together. More = better memory, but every answer
+      re-bills the whole history, so long chats get expensive and can hit
+      OpenAI rate limits. 12 is a good balance; 0 disables managed history and
+      starts fresh after an OpenAI session replacement.
   transcription_model:
     name: "⚙️ Advanced · Transcript model"
     description: >-
-      Only used when a spoken language is set (Basics). This model writes
-      your speech into the log as text — it does NOT affect how the assistant
-      understands you (it hears your actual voice). gpt-4o-transcribe
-      (default) is the most accurate. For an unlisted model pick "custom" and
-      enable "Show unused optional configuration options" at the bottom.
+      Creates the bounded in-memory text used to continue conversations across
+      OpenAI's hourly reconnect. It does NOT affect how the assistant
+      understands you (it hears your actual voice), and transcripts are not
+      logged. gpt-4o-transcribe is the default. For an unlisted model pick
+      "custom" and enable "Show unused optional configuration options" below.
   transcription_model_custom:
     name: "⚙️ Advanced · Transcript model (custom)"
     description: >-
@@ -220,8 +221,8 @@ configuration:
     description: >-
       How the end of your question is detected. Normally leave this UNSET:
       the assistant then understands when your sentence is finished
-      (semantic_vad). "server_vad" is the old silence-timer method, tuned by
-      the three fields below — kept only as an escape hatch.
+      (semantic_vad). "server_vad" is the old silence-timer method and
+      automatically disables managed Conversation memory.
   vad_threshold:
     name: "⚙️ Advanced · server_vad: loudness threshold"
     description: >-

@@ -13,7 +13,14 @@ from pipecat.transports.websocket.server import WebsocketServerTransport, Websoc
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
-from pipecat.frames.frames import Frame, InputAudioRawFrame, OutputAudioRawFrame, StartFrame, EndFrame, ErrorFrame
+from pipecat.frames.frames import (
+    EndFrame,
+    ErrorFrame,
+    Frame,
+    InputAudioRawFrame,
+    OutputAudioRawFrame,
+    StartFrame,
+)
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.services.openai.realtime import events as openai_rt_events
 
@@ -159,10 +166,12 @@ class ConnectionRecovery(FrameProcessor):
     _SESSION_DEAD_MARKERS = (
         "session_expired",
         "maximum duration",
+        "context compaction failed",
     )
     RECONNECT_COOLDOWN_S = 5.0
     RECONNECT_BACKOFF_INITIAL_S = 1.0
     RECONNECT_BACKOFF_MAX_S = 15.0
+    TOOL_DRAIN_TIMEOUT_S = 180.0
     IDLE_UNSTICK_COOLDOWN_S = 2.0
     # Proactive refresh: reconnect BEFORE OpenAI's 60-min session cap, but only
     # while the house is genuinely quiet, so the cap practically never lands
@@ -195,6 +204,11 @@ class ConnectionRecovery(FrameProcessor):
         self._last_input_audio = time.monotonic()
         self._refresh_task = None
         self._recovery_task = None
+        self._recovery_delayed = False
+        self._recovery_complete_callback = None
+
+    def set_recovery_complete_callback(self, callback) -> None:
+        self._recovery_complete_callback = callback
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -231,8 +245,18 @@ class ConnectionRecovery(FrameProcessor):
             reader_dead = "realtime receive loop" in msg
             if send_flood or session_dead or reader_dead:
                 now = time.monotonic()
-                if now - self._last_attempt >= self.RECONNECT_COOLDOWN_S:
-                    self._reconnecting = True
+                delay = max(
+                    0.0,
+                    self.RECONNECT_COOLDOWN_S - (now - self._last_attempt),
+                )
+                self._reconnecting = True
+                if delay:
+                    self._recovery_delayed = True
+                    self._recovery_task = asyncio.create_task(
+                        self._recover_after(delay, msg)
+                    )
+                else:
+                    self._recovery_delayed = False
                     self._last_attempt = now
                     self._recovery_task = asyncio.create_task(self._recover(msg))
             else:
@@ -250,16 +274,41 @@ class ConnectionRecovery(FrameProcessor):
                     asyncio.create_task(self._unstick_idle(msg))
         await self.push_frame(frame, direction)
 
-    async def force_reconnect(self, reason: str) -> None:
+    async def _recover_after(self, delay: float, reason: str) -> None:
+        await asyncio.sleep(delay)
+        self._recovery_delayed = False
+        await self._recover(reason)
+
+    async def force_reconnect(
+        self,
+        reason: str,
+        *,
+        bypass_cooldown: bool = False,
+    ) -> None:
         """Positive-liveness reconnect: for wedged (half-open) sockets that
         produce NO ErrorFrames at all — audio streams out, nothing comes back
         (observed live 2026-07-16: wake + speech after an idle gap → zero
         server events, no error, request lost)."""
         now = time.monotonic()
-        if self._reconnecting or now - self._last_attempt < self.RECONNECT_COOLDOWN_S:
+        if self._reconnecting:
+            if not (
+                bypass_cooldown
+                and self._recovery_delayed
+                and self._recovery_task is not None
+            ):
+                return
+            self._recovery_task.cancel()
+            await asyncio.gather(self._recovery_task, return_exceptions=True)
+            self._reconnecting = False
+            self._recovery_delayed = False
+        if (
+            not bypass_cooldown
+            and now - self._last_attempt < self.RECONNECT_COOLDOWN_S
+        ):
             return
         self._reconnecting = True
         self._last_attempt = now
+        self._recovery_delayed = False
         self._recovery_task = asyncio.create_task(self._recover(reason))
         await self._recovery_task
 
@@ -276,19 +325,65 @@ class ConnectionRecovery(FrameProcessor):
         age_s = t0 - self._connected_at
         self._reconnecting = True
         try:
+            begin_recovery = getattr(self._service, "begin_recovery", None)
+            if begin_recovery is not None:
+                begin_recovery()
             logger.warning(
                 f"🔌 OpenAI Realtime connection lost after {age_s:.0f}s "
                 f"({reason[:90]}) — reconnecting…"
             )
             # Unstick the device first, regardless of how the reconnect goes.
             try:
-                await self._go_idle(f"reconnect: {reason[:60]}")
+                await asyncio.wait_for(
+                    self._go_idle(f"reconnect: {reason[:60]}"),
+                    timeout=2.0,
+                )
+            except TimeoutError:
+                logger.warning("⚠️ timed out emitting idle during recovery")
             except Exception as e:
                 logger.warning(f"⚠️ could not emit idle during recovery: {e!r}")
             reset = getattr(self._service, "reset_conversation", None)
             if reset is None:
                 logger.error("❌ service has no reset_conversation(); cannot reconnect in place")
                 return
+            if begin_recovery is not None:
+                await asyncio.sleep(0)
+            tool_deadline = time.monotonic() + self.TOOL_DRAIN_TIMEOUT_S
+            while TURN_LIVENESS.in_flight > 0:
+                if time.monotonic() >= tool_deadline:
+                    logger.warning(
+                        "⚠️ old tools exceeded recovery drain timeout; "
+                        "discarding their future conversation results"
+                    )
+                    discard_running = getattr(
+                        self._service,
+                        "discard_running_tool_results",
+                        None,
+                    )
+                    if discard_running is not None:
+                        discard_result = discard_running()
+                        if discard_result is not None:
+                            await discard_result
+                    break
+                logger.info(
+                    "🔇 waiting for %s old tool(s) before replacing OpenAI session",
+                    TURN_LIVENESS.in_flight,
+                )
+                await asyncio.sleep(0.1)
+            wait_for_scheduled_calls = getattr(
+                self._service,
+                "wait_for_scheduled_tool_calls",
+                None,
+            )
+            if wait_for_scheduled_calls is not None:
+                await wait_for_scheduled_calls()
+            wait_for_pending_results = getattr(
+                self._service,
+                "wait_for_pending_tool_results",
+                None,
+            )
+            if wait_for_pending_results is not None:
+                await wait_for_pending_results()
             attempt = 0
             backoff_s = self.RECONNECT_BACKOFF_INITIAL_S
             while True:
@@ -310,23 +405,11 @@ class ConnectionRecovery(FrameProcessor):
                     )
                     continue
 
-                while TURN_LIVENESS.in_flight > 0:
-                    logger.info(
-                        "🔇 OpenAI session ready; waiting for %s old tool(s) before "
-                        "re-enabling responses",
-                        TURN_LIVENESS.in_flight,
-                    )
-                    await asyncio.sleep(0.1)
-                wait_for_pending_results = getattr(
-                    self._service,
-                    "wait_for_pending_tool_results",
-                    None,
-                )
-                if wait_for_pending_results is not None:
-                    await wait_for_pending_results()
                 mark_complete = getattr(self._service, "mark_recovery_complete", None)
                 if mark_complete is not None:
                     mark_complete()
+                if self._recovery_complete_callback is not None:
+                    self._recovery_complete_callback()
                 self._connected_at = time.monotonic()
                 logger.info(
                     f"✅ OpenAI Realtime session ready after {attempt} attempt(s) in "
@@ -469,6 +552,7 @@ class WebSocketHandler:
         # Connected device websockets, used to push va_client control/phase
         # messages as TEXT frames (the audio path uses the binary serializer).
         self._websockets: set = set()
+        self._wedge_tasks: set = set()
         # Graceful close is a single-device acknowledged control transaction.
         # Old firmware and out-of-turn requests fail closed instead of silently
         # claiming that the next follow-up will be suppressed.
@@ -560,6 +644,13 @@ class WebSocketHandler:
         if self.session_manager:
             context_aggregator = self.session_manager.create_context_aggregator(client_id)
             context_initializer = self.session_manager.create_context_initializer(client_id, context_aggregator)
+            bind_aggregator = getattr(
+                openai_service,
+                "bind_context_aggregator",
+                None,
+            )
+            if bind_aggregator is not None:
+                bind_aggregator(context_aggregator)
         
         # Build pipeline components. InputResampler runs FIRST (right after the
         # transport) so every later stage — VAD, context aggregator, OpenAI
@@ -596,20 +687,16 @@ class WebSocketHandler:
         if input_recorder:
             pipeline_components.append(input_recorder)
         
-        # Continue with rest of pipeline, with transcript-logging taps. The
-        # assistant reply text (TTSTextFrame) flows DOWNSTREAM out of the LLM
-        # while the user's TranscriptionFrame is pushed UPSTREAM (so the user
-        # aggregator can consume it) — opposite directions, so they need taps on
-        # opposite sides of the service (see transcript_logger.py): "user" before
-        # the LLM, "assistant" after it.
+        # The user aggregator consumes private transcription frames upstream.
+        # Only assistant reply text is logged, by the downstream tap.
         if context_aggregator:
-            pipeline_components.extend([
+            context_components = [
                 context_aggregator.user(),
-                TranscriptLogger(capture="user"),
                 openai_service,
                 TranscriptLogger(capture="assistant"),
                 context_aggregator.assistant(),
-            ])
+            ]
+            pipeline_components.extend(context_components)
         else:
             pipeline_components.extend([
                 TranscriptLogger(capture="user"),
@@ -660,9 +747,9 @@ class WebSocketHandler:
         # (suppress_incoming_audio_) until the next turn boundary. So the backend
         # does NOT need to clear its own output here — the user already hears
         # silence. The backend's only job is to stop OpenAI generating MORE
-        # tokens: a plain response.cancel, and ONLY while a response is actually
-        # active (avoids the noisy response_cancel_not_active in the common
-        # already-burst-finished case).
+        # tokens: a plain response.cancel. It is sent unconditionally so a
+        # response.create that is in flight cannot escape cancellation; the
+        # benign response_cancel_not_active race is filtered by the service.
         #
         # We deliberately do NOT queue an InterruptionTaskFrame anymore. It made
         # pipecat run _handle_interruption → _truncate_current_audio_response(),
@@ -716,50 +803,123 @@ class WebSocketHandler:
         # on_real_speech, and {"type":"wake"}) — and a legitimate next turn needs
         # the user to actually speak — so it can never cancel a real turn.
         _kill_next_response = {"v": False}
+        _dangling_response_pending = {"v": False}
+        _dangling_response_generation = {"v": 0}
+        DANGLING_RESPONSE_TIMEOUT_S = 12.0
 
         async def _on_device_interrupt():
+            _dangling_response_pending["v"] = False
+            _dangling_response_generation["v"] += 1
             _interrupt_kill_until["t"] = time.monotonic() + INTERRUPT_KILL_WINDOW_S
             # Arm the next-response kill on EVERY stop (see the flag comment):
             # the 1.5 s time-window alone misses responses that land later —
             # OpenAI replying to the spoken "stop", or a slow tool's answer.
             _kill_next_response["v"] = True
+            # Suppression must become active before either network await below;
+            # function arguments are dispatched on a separate Pipecat task.
+            suppress_tools = getattr(
+                openai_service,
+                "suppress_tools_at_interrupt",
+                None,
+            )
+            interrupt_generation = 0
+            if suppress_tools is not None:
+                interrupt_generation = await suppress_tools()
             try:
-                await openai_service.send_client_event(openai_rt_events.InputAudioBufferClearEvent())
+                clear_event = openai_rt_events.InputAudioBufferClearEvent()
+                note_clear = getattr(
+                    openai_service,
+                    "note_interrupt_input_clear",
+                    None,
+                )
+                if note_clear is not None:
+                    note_clear(interrupt_generation)
+                await openai_service.send_client_event(clear_event)
                 logger.info("🛑 device interrupt → input_audio_buffer.clear sent (drop in-flight user audio)")
             except Exception as e:
                 logger.info(f"🛑 device interrupt → input_audio_buffer.clear no-op ({e!r})")
+                fail_clear = getattr(
+                    openai_service,
+                    "fail_interrupt_input_clear",
+                    None,
+                )
+                if fail_clear is not None:
+                    await fail_clear(interrupt_generation, e)
             try:
-                if getattr(openai_service, "_current_assistant_response", None) is not None:
-                    await openai_service.send_client_event(openai_rt_events.ResponseCancelEvent())
-                    logger.info("🛑 device interrupt → response.cancel sent (response was still active)")
-                else:
-                    logger.info("🛑 device interrupt → no active response to cancel (device already silenced)")
+                cancel_event = openai_rt_events.ResponseCancelEvent()
+                note_cancel = getattr(
+                    openai_service,
+                    "note_interrupt_cancel_event",
+                    None,
+                )
+                if note_cancel is not None:
+                    note_cancel(cancel_event.event_id, interrupt_generation)
+                await openai_service.send_client_event(cancel_event)
+                logger.info("🛑 device interrupt → response.cancel sent")
             except Exception as e:
                 logger.info(f"🛑 device interrupt → response.cancel no-op ({e!r})")
+                fail_cancel = getattr(
+                    openai_service,
+                    "fail_interrupt_cancel",
+                    None,
+                )
+                if fail_cancel is not None:
+                    await fail_cancel(interrupt_generation, e)
 
         @openai_service.event_handler("on_conversation_item_created")
         async def _kill_racing_response(service, item_id, item):
-            # Pipecat fires this for every conversation.item.added; only an
-            # ASSISTANT item right after a device interrupt is the racing
-            # response to the stop word the user just cancelled.
-            if getattr(item, "role", None) != "assistant":
+            # Function-call-only responses have no assistant role. They must be
+            # killed too or a stopped response can still mutate the home.
+            is_assistant = getattr(item, "role", None) == "assistant"
+            is_function_call = getattr(item, "type", None) == "function_call"
+            if not is_assistant and not is_function_call:
                 return
             within_window = time.monotonic() < _interrupt_kill_until["t"]
-            kill_armed = _kill_next_response["v"]
+            kill_armed = (
+                _kill_next_response["v"]
+                or _dangling_response_pending["v"]
+            )
             if not within_window and not kill_armed:
                 return
+            mark_interrupted = getattr(
+                openai_service,
+                "mark_interrupted_response",
+                None,
+            )
+            if mark_interrupted is not None:
+                await mark_interrupted()
+            _dangling_response_pending["v"] = False
+            _dangling_response_generation["v"] += 1
             # Consume the flag: this assistant item is the unwanted response the
             # user's stop pre-empted — a stop-acknowledgement ("Okay, I'll stop"),
             # a stopped tool's answer, or the cancelled reply's tail.
-            _kill_next_response["v"] = False
+            if not _dangling_response_pending["v"]:
+                _kill_next_response["v"] = False
             try:
-                await openai_service.send_client_event(openai_rt_events.ResponseCancelEvent())
+                cancel_event = openai_rt_events.ResponseCancelEvent()
+                note_cancel = getattr(
+                    openai_service,
+                    "note_interrupt_cancel_event",
+                    None,
+                )
+                if note_cancel is not None:
+                    note_cancel(cancel_event.event_id)
+                await openai_service.send_client_event(cancel_event)
                 logger.info(
                     "🛑 response raced in right after a device interrupt → "
                     "response.cancel (post-stop)"
                 )
             except Exception as e:
                 logger.info(f"🛑 post-interrupt racing-response cancel no-op ({e!r})")
+            if is_function_call:
+                suppress_call = getattr(
+                    openai_service,
+                    "suppress_function_call_after_interrupt",
+                    None,
+                )
+                call_id = getattr(item, "call_id", None)
+                if suppress_call is not None and call_id:
+                    await suppress_call(call_id)
 
         async def _on_device_session_start():
             # va_client sends {"type":"start"} once per WebSocket CONNECTION
@@ -769,10 +929,24 @@ class WebSocketHandler:
             # with a clean one. The per-WAKE/follow-up stale-buffer case is
             # covered by the device's {"type":"flush"} on follow-up timeout.
             try:
+                note_clear = getattr(
+                    openai_service,
+                    "note_unscoped_input_clear",
+                    None,
+                )
+                if note_clear is not None:
+                    note_clear()
                 await openai_service.send_client_event(openai_rt_events.InputAudioBufferClearEvent())
                 logger.info("🎬 device (re)connected → input_audio_buffer.clear (clean start)")
             except Exception as e:
                 logger.debug(f"🎬 connect-time input clear no-op ({e!r})")
+                cancel_clear = getattr(
+                    openai_service,
+                    "cancel_unscoped_input_clear",
+                    None,
+                )
+                if cancel_clear is not None:
+                    cancel_clear()
 
         async def _on_device_mic_flush():
             # The device sends {"type":"flush"} when a follow-up window times out
@@ -784,10 +958,24 @@ class WebSocketHandler:
             # closed without speech, so any later server-VAD stop is dangling.
             phase_emitter.note_wake()
             try:
+                note_clear = getattr(
+                    openai_service,
+                    "note_unscoped_input_clear",
+                    None,
+                )
+                if note_clear is not None:
+                    note_clear()
                 await openai_service.send_client_event(openai_rt_events.InputAudioBufferClearEvent())
                 logger.info("🧽 follow-up cut-off → input_audio_buffer.clear (drop partial utterance)")
             except Exception as e:
                 logger.debug(f"🧽 mic-flush input clear no-op ({e!r})")
+                cancel_clear = getattr(
+                    openai_service,
+                    "cancel_unscoped_input_clear",
+                    None,
+                )
+                if cancel_clear is not None:
+                    cancel_clear()
 
         WEDGE_TIMEOUT_S = 12.0
 
@@ -807,16 +995,19 @@ class WebSocketHandler:
             self.cancel_graceful_close_request()
             if await connection_recovery.reject_wake_while_recovering():
                 return
-            asyncio.create_task(_wedge_check(time.monotonic()))
+            wedge_task = asyncio.create_task(_wedge_check(time.monotonic()))
+            self._wedge_tasks.add(wedge_task)
+            wedge_task.add_done_callback(self._wedge_tasks.discard)
             # va_client sends {"type":"wake"} on every wake (start_session). Mark
             # the turn boundary for the dangling-VAD guard (A): until the user
             # actually speaks, a server-VAD end-of-turn is a stale pre-wake
             # segment closing late → suppress its thinking + cancel its garbage
             # response (handled in PhaseEmitter via the kill-window callbacks).
             phase_emitter.note_wake()
-            # New turn boundary: drop any pending post-tool kill so it can't
-            # leak onto this fresh turn's response.
-            _kill_next_response["v"] = False
+            # Preserve a dangling-response kill until its stale response is
+            # consumed; ordinary post-stop kills end at this turn boundary.
+            if not _dangling_response_pending["v"]:
+                _kill_next_response["v"] = False
 
         # Wire the dangling-VAD guard's kill-window into the PhaseEmitter. It
         # reuses the SAME _interrupt_kill_until + _kill_racing_response machinery
@@ -824,15 +1015,61 @@ class WebSocketHandler:
         # garbage response is cancelled; on a real UserStartedSpeaking, clear it
         # so a genuine new turn's response is never cancelled.
         def _clear_kill_window():
-            # Real user speech = a genuine new turn — disarm BOTH the time
-            # window and the post-tool flag so neither can cancel it.
-            _interrupt_kill_until["t"] = 0.0
-            _kill_next_response["v"] = False
+            # Managed turns have an explicit response.create boundary below;
+            # retain dangling protection until that boundary so a delayed stale
+            # function call cannot slip through after speech begins.
+            if not _dangling_response_pending["v"]:
+                _dangling_response_generation["v"] += 1
+                _dangling_response_pending["v"] = False
+                _interrupt_kill_until["t"] = 0.0
+                _kill_next_response["v"] = False
             self.cancel_graceful_close_request()
 
+        def _arm_dangling_response_kill():
+            _interrupt_kill_until["t"] = (
+                time.monotonic() + INTERRUPT_KILL_WINDOW_S
+            )
+            _kill_next_response["v"] = True
+            _dangling_response_pending["v"] = True
+            _dangling_response_generation["v"] += 1
+            generation = _dangling_response_generation["v"]
+
+            async def expire_dangling_response_kill():
+                await asyncio.sleep(DANGLING_RESPONSE_TIMEOUT_S)
+                if generation != _dangling_response_generation["v"]:
+                    return
+                _dangling_response_pending["v"] = False
+                _kill_next_response["v"] = False
+                _interrupt_kill_until["t"] = 0.0
+
+            expiry_task = asyncio.create_task(expire_dangling_response_kill())
+            self._wedge_tasks.add(expiry_task)
+            expiry_task.add_done_callback(self._wedge_tasks.discard)
+            reconnect_task = asyncio.create_task(
+                connection_recovery.force_reconnect(
+                    "dangling server VAD boundary",
+                    bypass_cooldown=True,
+                )
+            )
+            self._wedge_tasks.add(reconnect_task)
+            reconnect_task.add_done_callback(self._wedge_tasks.discard)
+
+        def _clear_dangling_response_kill():
+            _dangling_response_generation["v"] += 1
+            _dangling_response_pending["v"] = False
+            _kill_next_response["v"] = False
+            _interrupt_kill_until["t"] = 0.0
+
+        set_recovery_callback = getattr(
+            connection_recovery,
+            "set_recovery_complete_callback",
+            None,
+        )
+        if set_recovery_callback is not None:
+            set_recovery_callback(_clear_dangling_response_kill)
+
         phase_emitter.set_kill_window_handlers(
-            on_dangling=lambda: _interrupt_kill_until.__setitem__(
-                "t", time.monotonic() + INTERRUPT_KILL_WINDOW_S),
+            on_dangling=_arm_dangling_response_kill,
             on_real_speech=_clear_kill_window,
         )
 
@@ -1245,6 +1482,13 @@ class WebSocketHandler:
     
     async def cleanup(self):
         """Cleanup WebSocket handler resources."""
+        wedge_tasks = list(self._wedge_tasks)
+        for task in wedge_tasks:
+            task.cancel()
+        if wedge_tasks:
+            await asyncio.gather(*wedge_tasks, return_exceptions=True)
+        self._wedge_tasks.clear()
+
         if self._connection_recovery is not None:
             await self._connection_recovery.cleanup()
 
