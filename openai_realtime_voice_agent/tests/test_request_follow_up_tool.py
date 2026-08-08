@@ -24,11 +24,11 @@ VALID_ARGUMENTS = {"purpose": REQUEST_FOLLOW_UP_PURPOSE}
 
 
 class RequestFollowUpToolTests(unittest.IsolatedAsyncioTestCase):
-    def test_schema_is_strict_and_limits_use_to_one_necessary_question(self):
+    def test_schema_is_realtime_compatible_and_limits_use_to_one_question(self):
         definition = get_request_follow_up_tool_definition()
 
         self.assertEqual(definition["name"], REQUEST_FOLLOW_UP_TOOL_NAME)
-        self.assertIs(definition["strict"], True)
+        self.assertNotIn("strict", definition)
         self.assertEqual(
             definition["parameters"],
             {

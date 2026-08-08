@@ -48,7 +48,7 @@ class ReleaseHardeningTests(unittest.TestCase):
         )
         for value in (LOCK_SHA256, MODEL_SHA256, AARCH64_BASE, AMD64_BASE):
             self.assertIn(value, workflow + dockerfile + build)
-        self.assertIn("ADDON_VERSION: 0.21.0", workflow)
+        self.assertIn("ADDON_VERSION: 0.21.1", workflow)
         self.assertIn("BUILD_REVISION=${{ github.sha }}", workflow)
         self.assertIn("org.opencontainers.image.revision", dockerfile)
         self.assertIn("io.true-family.voice.poetry-lock-sha256", dockerfile)

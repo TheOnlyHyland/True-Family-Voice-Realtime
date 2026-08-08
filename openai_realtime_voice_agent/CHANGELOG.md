@@ -2,6 +2,12 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.21.1 (fork)
+
+- Removed the unsupported top-level `strict` field from the
+  `request_follow_up` Realtime session tool. The handler retains exact argument
+  validation and rejects every purpose except `necessary_clarification`.
+
 ## 0.21.0 (fork)
 
 - **Compatibility warning:** deploy Voice PE firmware 0.19.0 or newer first,
