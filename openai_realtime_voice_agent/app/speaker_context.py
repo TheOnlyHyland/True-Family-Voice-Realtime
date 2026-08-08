@@ -144,7 +144,7 @@ class SpeakerProbe:
             else:
                 label = "match"  # enrolled non-household print
             return label, name, score, "voiceprint"
-        # Live wake audio still scores far below enrollment audio for the same
+        # Live wake audio still scores far below reference audio for the same
         # speaker (observed 0.48 then 0.22 for a verified household member) —
         # until thresholds are recalibrated on live captures, treat a non-match
         # as "voiceprint can't tell" and fall back to the pitch heuristic
@@ -169,7 +169,7 @@ class SpeakerProbe:
                         w.setsampwidth(2)
                         w.setframerate(16000)
                         w.writeframes(data)
-                    logger.info(f"🎙️ speaker probe capture saved: {path}")
+                    logger.info("🎙️ speaker probe capture saved")
                     # Retention: cap the probe archive at the newest 500 files
                     # (~50 MB) so harvesting can run indefinitely without hygiene.
                     try:

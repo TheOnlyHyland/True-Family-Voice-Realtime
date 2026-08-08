@@ -1,10 +1,15 @@
 """Simple serializer for raw binary PCM audio frames."""
-import json
 import logging
 import os
 import time
 from pipecat.frames.frames import InputAudioRawFrame, OutputAudioRawFrame, Frame
 from pipecat.serializers.base_serializer import FrameSerializer, FrameSerializerType
+
+from .protocol_json import MAX_CONTROL_MESSAGE_BYTES, decode_protocol_object
+from .single_owner_websocket import (
+    current_message_websocket,
+    current_output_audio_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +57,6 @@ class RawAudioSerializer(FrameSerializer):
         # WebSocketHandler.build_pipeline.
         self._on_wake = None
         self._speaker_probe = None
-        self._enrollment_recorder = None
-        self._on_enroll_stopped = None
         self._last_wake_mono = 0.0
         self._on_button_cancel = None
         # True once any reply audio has gone OUT since the last wake. A button
@@ -68,6 +71,12 @@ class RawAudioSerializer(FrameSerializer):
         # device (cancels its no-speech watchdog — audio is flowing).
         self._ack_pending = False
         self._on_first_audio = None
+        # Pipecat 0.0.97 has no on_client_message event; acknowledged protocol
+        # controls must therefore cross the serializer's text-frame path.
+        self._on_control = None
+        self._audio_admitted = False
+        self._binary_audio_authorizer = None
+        self._output_audio_authorizer = None
 
     def set_interrupt_handler(self, handler):
         """Register the async no-arg callback fired on a device 'interrupt'."""
@@ -90,11 +99,6 @@ class RawAudioSerializer(FrameSerializer):
         every inbound audio frame (cheap append; classification runs off-loop)."""
         self._speaker_probe = probe
 
-    def set_enrollment_recorder(self, recorder):
-        """Register an EnrollmentRecorder: fed every inbound audio frame while
-        an enrollment session is active (guided voice-training capture)."""
-        self._enrollment_recorder = recorder
-
     def set_button_cancel_handler(self, handler):
         """Async no-arg callback for a button-cancel within 12s of a wake."""
         self._on_button_cancel = handler
@@ -103,17 +107,28 @@ class RawAudioSerializer(FrameSerializer):
         """Async no-arg callback fired on the first mic frame after a wake."""
         self._on_first_audio = handler
 
-    def set_enroll_stopped_handler(self, handler):
-        """Register the async no-arg callback fired when the DEVICE ends
-        enrollment ({"type":"enroll_stopped"} — button escape or firmware cap)."""
-        self._on_enroll_stopped = handler
+    def set_control_handler(self, handler):
+        """Register the async callback for acknowledged JSON control frames."""
+        self._on_control = handler
+
+    def set_audio_admitted(self, admitted: bool):
+        """Gate binary mic frames until the nonce hello transaction succeeds."""
+        self._audio_admitted = bool(admitted)
+
+    def set_binary_audio_authorizer(self, authorizer):
+        """Register a physical-socket and follow-up-stage mic gate."""
+        self._binary_audio_authorizer = authorizer
+
+    def set_output_audio_authorizer(self, authorizer):
+        """Register an async final gate for assistant PCM output."""
+        self._output_audio_authorizer = authorizer
 
     @property
     def type(self) -> FrameSerializerType:
         """Get the serialization type - binary for raw audio."""
         return FrameSerializerType.BINARY
 
-    async def deserialize(self, message: bytes) -> InputAudioRawFrame:
+    async def deserialize(self, message: bytes | str) -> InputAudioRawFrame | None:
         """Deserialize binary message as raw PCM audio frame.
 
         Args:
@@ -132,19 +147,32 @@ class RawAudioSerializer(FrameSerializer):
         # here would be indistinguishable from the VAD's own per-utterance
         # interruptions and would cancel the reply on any speech.
         if isinstance(message, str):
+            if len(message.encode("utf-8")) > MAX_CONTROL_MESSAGE_BYTES:
+                return None
             try:
-                data = json.loads(message)
+                data = decode_protocol_object(message)
             except (ValueError, TypeError):
                 return None
-            if isinstance(data, dict) and data.get("type") == "interrupt":
-                # During voice enrollment the stop-word model false-fires on the
-                # user's repetition batches (observed live: red flash + dropped
-                # in-flight audio 10 s into round one). Ignore interrupts while
-                # enrolling so the captured batch survives; the device-side mic
-                # close is recovered by a silent re-wake.
-                if self._enrollment_recorder is not None and self._enrollment_recorder.active:
-                    logger.info("🛑 device interrupt IGNORED (enrollment active)")
-                    return None
+            message_type = data.get("type")
+
+            # Defense in depth behind the transport's per-socket gate. Before
+            # admission, the exact hello receipt is the only accepted text frame.
+            if not self._audio_admitted and message_type != "hello_ack":
+                return None
+            if self._on_control is None:
+                return None
+            try:
+                dispatch_local_handler = await self._on_control(
+                    data,
+                    current_message_websocket(),
+                )
+            except Exception as e:
+                logger.warning("Device control handler failed: %r", e)
+                return None
+            if not dispatch_local_handler:
+                return None
+
+            if isinstance(data, dict) and message_type == "interrupt":
                 logger.info("🛑 device interrupt received")
                 if self._on_interrupt is not None:
                     try:
@@ -196,14 +224,6 @@ class RawAudioSerializer(FrameSerializer):
                         await self._on_button_cancel()
                     except Exception as e:
                         logger.warning(f"⚠️ false-flag handler failed: {e!r}")
-            elif isinstance(data, dict) and data.get("type") == "enroll_stopped":
-                # Device-side enrollment exit (button / firmware safety cap).
-                logger.info("🎓 device ended enrollment")
-                if self._on_enroll_stopped is not None:
-                    try:
-                        await self._on_enroll_stopped()
-                    except Exception as e:
-                        logger.warning(f"⚠️ enroll-stopped handler failed: {e!r}")
             elif isinstance(data, dict) and data.get("type") == "wake":
                 # Sent by va_client on every wake (start_session). Marks a fresh
                 # turn boundary for the dangling-VAD guard: until the user
@@ -232,6 +252,14 @@ class RawAudioSerializer(FrameSerializer):
             # Skip anything that isn't bytes or a known text control frame.
             return None
 
+        if not self._audio_admitted:
+            return None
+        if (
+            self._binary_audio_authorizer is not None
+            and not self._binary_audio_authorizer(current_message_websocket())
+        ):
+            return None
+
         # Validate audio format: 16-bit = 2 bytes per sample
         if len(message) % 2 != 0:
             logger.warning(f"⚠️ Received audio with odd byte count: {len(message)} bytes, skipping")
@@ -258,14 +286,6 @@ class RawAudioSerializer(FrameSerializer):
         if self._speaker_probe is not None:
             self._speaker_probe.feed(message)
 
-        # Voice enrollment: while a session is active, mic audio goes ONLY to
-        # the recorder — OpenAI must not hear it (no VAD commits, no forced
-        # responses, no cost). The device is in enrollment mode with its own
-        # LED/phase; the pipeline simply sees silence.
-        if self._enrollment_recorder is not None and self._enrollment_recorder.active:
-            self._enrollment_recorder.feed(message)
-            return None
-
         # Create InputAudioRawFrame at the device's mic rate; the InputResampler
         # processor (right after transport.input()) upsamples it to 24 kHz.
         frame = InputAudioRawFrame(
@@ -277,18 +297,27 @@ class RawAudioSerializer(FrameSerializer):
         return frame
     
     async def serialize(self, frame: Frame) -> bytes:
-        if isinstance(frame, OutputAudioRawFrame):
-            self._reply_audio_since_wake = True
         """Serialize frame to binary message.
         
         For output audio frames, we just return the raw audio bytes.
         Other frames are not serialized (return empty bytes).
         """
         if isinstance(frame, OutputAudioRawFrame):
+            if not self._audio_admitted:
+                return b""
+            if self._output_audio_authorizer is not None:
+                try:
+                    if not await self._output_audio_authorizer(
+                        current_output_audio_context()
+                    ):
+                        return b""
+                except Exception as error:
+                    logger.warning("Assistant audio gate failed: %r", error)
+                    return b""
+            self._reply_audio_since_wake = True
             audio_bytes = frame.audio
             logger.debug(f"📤 Serializing OutputAudioRawFrame: {len(audio_bytes)} bytes")
             return audio_bytes
         # For other frame types, return empty bytes (not serialized)
         logger.debug(f"📤 Serializing non-audio frame: {type(frame).__name__}, returning empty bytes")
         return b""
-

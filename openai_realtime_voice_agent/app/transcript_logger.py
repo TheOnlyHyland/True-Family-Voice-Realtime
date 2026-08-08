@@ -1,9 +1,9 @@
-"""Log the assistant transcript into the add-on log.
+"""Track assistant transcript completion without logging conversation content.
 
 WHY: with gpt-realtime the model hears the user's audio natively and bursts the
-whole spoken reply as audio — the only window into *what it actually said* used to
-be the OpenAI tool-call arguments. This processor surfaces the assistant's spoken
-text as a plain INFO line so the add-on log explains what the device said.
+whole spoken reply as audio. This processor observes its text frames only to emit
+bounded completion metadata; the conversation content never enters production
+logs.
 
 How the text reaches us (verified against pipecat 0.0.97's *real*
 `pipecat.services.openai.realtime.llm.OpenAIRealtimeLLMService` — NOT the older
@@ -40,7 +40,7 @@ class TranscriptLogger(FrameProcessor):
     def __init__(self, capture: str = "both", **kwargs):
         super().__init__(**kwargs)
         self._capture = capture
-        self._assistant_buf: list[str] = []
+        self._assistant_chars = 0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -51,11 +51,14 @@ class TranscriptLogger(FrameProcessor):
             # End bracket so it's one readable line instead of one per chunk.
             if isinstance(frame, (TTSTextFrame, LLMTextFrame)):
                 if frame.text:
-                    self._assistant_buf.append(frame.text)
+                    self._assistant_chars += len(frame.text)
             elif isinstance(frame, LLMFullResponseEndFrame):
-                text = "".join(self._assistant_buf).strip()
-                self._assistant_buf = []
-                if text:
-                    logger.info(f"🤖 assistant: {text}")
+                character_count = self._assistant_chars
+                self._assistant_chars = 0
+                if character_count:
+                    logger.info(
+                        "🤖 assistant response completed (%d characters)",
+                        character_count,
+                    )
 
         await self.push_frame(frame, direction)

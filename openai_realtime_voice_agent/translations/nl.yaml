@@ -66,17 +66,17 @@ configuration:
     name: "🗣️ Model & stem · Maximale antwoordlengte"
     description: >-
       Begrenst hoe lang een antwoord mag worden, in tokens (≈ 0,75 woord per
-      stuk). 0 = geen limiet. Zet bijv. 1024 als hij soms blijft doorpraten;
-      te laag kapt antwoorden midden in een zin af.
+      stuk). De eindige standaard van 1200 tokens begrenst ontspoorde antwoorden
+      en kosten zonder normale antwoorden te raken. Te laag kapt zinnen af.
 
   # --- 💬 Gesprek ---
   follow_up_listen_seconds:
-    name: "💬 Gesprek · Naluisteren (seconden)"
+    name: "💬 Gesprek · Naluistermodus (moet 0 zijn)"
     description: >-
-      Na een antwoord blijft het apparaat zo lang luisteren, zodat je gewoon
-      kunt doorpraten — zonder opnieuw het wake-woord te zeggen. De LED-ring
-      toont ondertussen de luisterkleur. 8 voelt natuurlijk; 0 zet het uit
-      (wake-woord voor elke vraag).
+      Versie 0.21.0 vereist 0: na gewone antwoorden sluit de microfoon en alleen
+      voor een noodzakelijke vraag kan het model per fysieke wake maximaal één
+      naluistervenster aanvragen. Een opgeslagen waarde boven 0 blokkeert nu het
+      opstarten; automatisch naluisteren is niet beschikbaar in deze snelle pilot.
   follow_up_open_delay_ms:
     name: "💬 Gesprek · Naluister-vertraging (ms)"
     description: >-
@@ -148,6 +148,23 @@ configuration:
       in een rumoerige omgeving slecht verstaat.
 
   # --- 🏠 Home Assistant ---
+  speaker_male_name:
+    name: "🗣️ Sprekers · Naam bij mannenstem"
+    description: >-
+      Naam die wordt gebruikt wanneer een mannenstem wordt herkend (bijv.
+      "James"). Laat beide naamvelden leeg om sprekerdetectie uit te schakelen.
+      Dit is een stemtypeheuristiek, geen biometrische beveiliging.
+  speaker_female_name:
+    name: "🗣️ Sprekers · Naam bij vrouwenstem"
+    description: >-
+      Naam die wordt gebruikt wanneer een vrouwenstem wordt herkend (bijv.
+      "Mary").
+  male_only_tools:
+    name: "🗣️ Sprekers · Tools alleen voor mannenstem"
+    description: >-
+      Kommagescheiden toolnamen die alleen worden uitgevoerd bij de herkende
+      mannenstem (bijv. "ask_openclaw"). Dit wordt onder het model afgedwongen,
+      maar blijft een gemakscontrole en geen biometrische beveiliging.
   ha_mcp_url:
     name: "🏠 Home Assistant · MCP-server-URL"
     description: >-
@@ -164,10 +181,28 @@ configuration:
   mcp_tool_allowlist:
     name: "🏠 Home Assistant · Tool-allowlist"
     description: >-
-      Kommagescheiden lijst van besturingstools die de assistent mag
-      gebruiken; leeg = allemaal. Met de ingebouwde MCP-server kun je dit
-      leeg laten. Vooral nuttig met de ha-mcp-add-on (80+ tools) om gesprekken
-      snel en goedkoop te houden.
+      Verplichte kommagescheiden lijst met exacte, hoofdlettergevoelige MCP-
+      toolnamen die de assistent mag gebruiken. Leeg betekent veilig geen MCP-
+      tools. Neem voor de uitrol alle gewenste Home Assistant- en aangepaste
+      scripttools expliciet over om volledige huisbediening te behouden.
+  nearby_media_players:
+    name: "🏠 Home Assistant · Mediaspelers in de buurt"
+    description: >-
+      Verplichte kommagescheiden media_player-entiteits-ID's bij deze Voice PE,
+      maximaal 16. Neem voor deze uitrol de exacte entiteits-ID's van de
+      woonkamer-tv en woonkamer-Chromecast op. Voor het reserveren en direct
+      voor het openen van een
+      aangevraagd naluistervenster controleert de add-on alleen deze exacte
+      entiteiten. Afspelen, bufferen, aan, gepauzeerd, niet beschikbaar,
+      onbekend, geweigerd, ongeldig of een time-out houdt de microfoon dicht;
+      de gesprekscontext blijft beschikbaar na het volgende wake-woord. Leeg
+      blokkeert het opstarten. Het model krijgt hiervoor geen statustool.
+  enable_voice_memory:
+    name: "🏠 Home Assistant · Permanent stemgeheugen inschakelen"
+    description: >-
+      Activeert expliciet de tools remember, forget en list_memories en leest
+      lokale vaste notities in elke modelsessie. Standaard uit, net als audio-
+      opname, omdat gesproken geheugen onder /share herstarts overleeft.
 
   # --- ⚙️ Geavanceerd ---
   websocket_port:
@@ -187,8 +222,9 @@ configuration:
     description: >-
       Hoeveel volledige, door de gebruiker gestarte beurten de assistent
       onthoudt. Toolaanroepen en resultaten blijven bij elkaar. Meer = beter
-      geheugen, maar ook hogere kosten. 12 is een goede balans; 0 schakelt
-      beheerde historie uit en begint opnieuw na een OpenAI-sessiewissel.
+      geheugen, maar ook hogere kosten. 12 is een goede balans. Versie 0.21.0
+      vereist een waarde boven 0, zodat een noodzakelijke vervolgvraag na een
+      nieuwe wake behouden blijft.
   transcription_model:
     name: "⚙️ Geavanceerd · Transcriptmodel"
     description: >-
@@ -205,9 +241,8 @@ configuration:
     name: "⚙️ Geavanceerd · Beurtdetectie (legacy)"
     description: >-
       Hoe het einde van je vraag wordt herkend. Normaal NIET instellen: de
-      assistent begrijpt dan zelf wanneer je zin af is (semantic_vad).
-      "server_vad" is de oude stiltetimer-methode en schakelt beheerd
-      gespreksgeheugen automatisch uit.
+      assistent begrijpt dan zelf wanneer je zin af is (semantic_vad). Versie
+      0.21.0 weigert de oude "server_vad"-stiltetimer bij het opstarten.
   vad_threshold:
     name: "⚙️ Geavanceerd · server_vad: geluidsdrempel"
     description: >-
@@ -231,3 +266,36 @@ configuration:
     description: >-
       Slaat microfoon- en speakeraudio op in bestanden binnen de add-on,
       alleen voor probleemanalyse. Normaal uit laten.
+
+  # --- 🧩 Fork-functies ---
+  instance_name:
+    name: "🧩 Fork · Instantienaam (kamer)"
+    description: >-
+      Korte naam voor de kamer of dit apparaat (bijv. kitchen). Wordt gebruikt
+      in Home Assistant-sensornamen en om agentmeldingen naar het juiste
+      apparaat terug te sturen. Gebruik één add-on-instantie per apparaat.
+  timer_ring_entity:
+    name: "🧩 Fork · Entiteit voor timerbel"
+    description: >-
+      De timer_ringing-switch van het apparaat (bijv.
+      switch.voice_pe_timer_ringing). Leeg laten schakelt de timerbel uit.
+  openclaw_url:
+    name: "🧩 Fork · URL van de agentbridge"
+    description: >-
+      Rechtstreeks endpoint van je externe agentbridge (POST {"question"} →
+      {"answer"}, {"recall"} → {"matches"}). Activeert ask_openclaw zonder de
+      Home Assistant MCP-limiet van 60 seconden en de snelle recall_memory-tool.
+      Leeg laten om alleen de tools van je MCP-server te gebruiken.
+  announce_port:
+    name: "🧩 Fork · Poort voor aankondigingen"
+    description: >-
+      Poort voor het LAN-endpoint voor aankondigingen (bijv. 8090). Externe
+      agents posten /announce {"message"} om in deze kamer te spreken. 0
+      schakelt dit uit; ook het aankondigingstoken is vereist.
+  announce_token:
+    name: "🧩 Fork · Token voor aankondigingen"
+    description: >-
+      Bearer-token dat het aankondigingsendpoint beveiligt. Genereer een lange
+      willekeurige waarde en behandel die als wachtwoord; dit veld wordt in het
+      Configuratie-tabblad gemaskeerd. Iedereen met dit token kan via het
+      apparaat spreken.

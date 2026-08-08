@@ -170,7 +170,7 @@ def create_disconnect_tool_handler(
     """
     async def disconnect_tool_handler(params: "FunctionCallParams") -> None:
         """Handle disconnect tool calls."""
-        logger.info(f"🔌 Disconnect tool called: {params.function_name} with arguments: {params.arguments}")
+        logger.info(f"🔌 Disconnect tool called: {params.function_name}")
         
         # Get reason from arguments
         reason = params.arguments.get("reason", "user_requested")

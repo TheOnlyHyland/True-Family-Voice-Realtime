@@ -1,7 +1,7 @@
-"""Build a voice-print centroid from enrollment audio.
+"""Build a voice-print centroid from administrator-supplied reference audio.
 
 Usage (inside the add-on container):
-    python3 -m app.build_voiceprint <name> /share/voice-enrollment/<file>.wav [...]
+    python3 -m app.build_voiceprint <name> <reference.wav> [...]
 
 Embeds each file in ~3 s chunks, averages, normalizes, writes
 /share/voice-prints/<name>.json.
@@ -18,7 +18,7 @@ from . import voiceprint
 
 def build(name: str, files: list) -> dict:
     """Build and write the centroid; returns {"ok", "chunks", "path"|"error"}.
-    Called automatically after enrollment, and by the CLI below."""
+    Called only by the explicit offline CLI below."""
     name = name.strip().lower()
     vecs = []
     for path in files:

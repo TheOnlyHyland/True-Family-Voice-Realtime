@@ -2,6 +2,97 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.21.0 (fork)
+
+- **Compatibility warning:** deploy Voice PE firmware 0.19.0 or newer first,
+  verify it, and only then deploy backend 0.21.0. Rollbacks must reverse that
+  order: backend first, firmware second. Backend-first rollout and
+  firmware-first rollback are unsupported.
+- Backend CI now requires the exact firmware `0.19.0` source tag and immutable
+  release package. It validates the final manifest, factory, OTA, ELF, and
+  `SHA256SUMS` hashes; missing or mismatched external inputs cannot be skipped in
+  CI, while standalone local tests may use the committed protocol fixture.
+- MCP authority is now fail-closed and checked at dispatch: an exact tool name
+  must be present in both the administrator's `mcp_tool_allowlist` and the current
+  Realtime session schema. Empty exposes no MCP tools. Deployment must carry
+  forward the complete desired whole-home and custom-script list explicitly.
+- Microphone enrollment is de-scoped from the rapid pilot. Enrollment protocol,
+  capture, conductor, configuration, and sensor controls are absent; the backend
+  only consumes voice prints that an administrator provisioned offline.
+- Persistent voice memory is gated by `enable_voice_memory` and defaults off.
+  Disabled sessions expose no memory tools and do not read the memory file.
+- Selective follow-up startup now requires a nonempty fixed nearby-media scope;
+  this deployment must configure the Living Room TV and Chromecast. The default
+  output cap is now a finite 1200 tokens.
+- Production logging now redacts every known configured OpenAI, Supervisor, Home
+  Assistant, announce, and OpenClaw credential spelling, including MCP exception
+  messages and bearer headers.
+- Ordinary replies now close the microphone by default. In managed semantic-VAD
+  mode, the model can call a strict internal `request_follow_up` tool whose only
+  accepted purpose enum is `necessary_clarification`, and only for one necessary
+  question.
+- At most one no-wake follow-up can be accepted per physical device wake. The
+  budget resets only on a new device wake and stays spent across additional
+  turns, socket replacement, OpenAI replay/recovery, stop, mute, timeout,
+  competing responses, and other tool calls.
+- Requested follow-ups are bound to the exact tool continuation, response audio,
+  playback boundary, admitted device socket, session nonce, wake generation, and
+  unpredictable token. Opening is now two-phase: PREPARE ACK, firmware READY with
+  a fresh nonce, final media check, COMMIT ACK, then microphone audio. Stop, mute,
+  recovery, replacement, late audio, and uncertain cancellation fail closed.
+- Added `nearby_media_players`, a fixed administrator-supplied list of up to 16
+  exact `media_player` entity IDs. The add-on checks them internally through the
+  authenticated Home Assistant REST boundary before reservation and again at the
+  firmware READY boundary. Active, paused, uncertain, unavailable, denied, malformed,
+  or timed-out state keeps the microphone closed without discarding conversation
+  context. No model-callable state tool was added.
+- Version 0.21.0 requires `follow_up_listen_seconds: 0`, managed semantic VAD,
+  backend-owned response creation, and bounded context. Saved nonzero legacy mode now fails
+  startup with a clear error rather than silently opening after every reply.
+- Added a project-owned Pipecat 0.0.97 single-owner transport adapter. Raw
+  candidates receive no assistant audio, can send only the exact hello receipt,
+  cannot displace an admitted owner, and delayed old disconnects cannot clear a
+  replacement socket. Scheduled connection handlers now require explicit bounded
+  completion, and failed physical closes enter a bounded uncertain-socket quarantine.
+- Control JSON now rejects duplicate keys before dispatch. Trusted phase controls
+  carry the exact session nonce and wake generation, while the exact unbound
+  0.20.6 legacy shape remains documented. Semantic-VAD `thinking` now closes PCM
+  admission immediately while retaining the logical wake and one-shot follow-up
+  ownership needed for a model-authorized second turn.
+- Reconnect, device Stop, follow-up timeout, and firmware `client_revoke` now use
+  one exact generation-fenced OpenAI input-buffer clear and wait for its receipt.
+  Future wake, mic, and output paths remain closed while it settles. A failed
+  clear enters recovery and retires the physical socket before another wake can
+  advance. Phase sends remain serialized with wake/session transitions, and
+  assistant PCM is bound to the exact socket, wake, OpenAI response ID, and
+  response generation.
+- CI now installs the Poetry-locked production dependency closure and runs fresh-
+  process transport tests against the real Pipecat 0.0.97 package. The vendored
+  contract asserts exact control field arrays; normal CI requires exact firmware
+  source and package alignment.
+- The production image now copies one lock-built virtual environment from a
+  multi-stage builder. Docker and CI verify the same lock digest and pinned
+  Pipecat, NumPy, and Loguru versions. Loguru is configured before Pipecat imports
+  at INFO or higher with bounded records and redacted conversation/tool payloads.
+- Release images now wheel-install the application so `python -m app.main` works
+  under `PYTHONSAFEPATH`, pin each Home Assistant base by digest, freeze Debian
+  package indexes and direct package versions, pin Poetry and Poetry Core, and
+  verify the TitaNet source and digest. CI builds each architecture once, runs
+  amd64 natively and arm64 through QEMU by image ID, then publishes that unchanged
+  gated image behind `backend-production`. Release events only verify existing
+  immutable tags. A Dockerless rootfs-layout smoke is included for local
+  verification, GitHub Actions are commit-pinned, and publication refuses to
+  overwrite an existing version or source tag.
+- Assistant PCM ownership is retained outside Pipecat frames through the real
+  0.0.97 chunker. Every reconstructed chunk is bound to its exact response
+  generation and physical socket; ownership transitions drain queued/partial
+  old audio before a replacement can receive output.
+- OpenClaw secret-path URLs are redacted from standard and Loguru records, web
+  search no longer logs answer content, and `announce_token` is password-masked.
+- The rapid pilot remains unauthenticated plaintext and is supported only on a
+  trusted isolated LAN; protocol nonces provide freshness, not authentication or
+  encryption.
+
 ## 0.20.6 (fork)
 
 - Enable Python safe-path mode and use a non-root working directory so NLTK can
@@ -267,8 +358,8 @@ A reliability and voice-control polish release.
 ## 0.5.0
 
 A big stable release: everything built and tested on the dev channel over the
-past days. **Also update the Voice PE firmware** (v1.1.0 — one click in ESPHome
-Builder) to get the full effect of the "stop" improvements; the two halves
+past days. **Also update the Voice PE firmware** (v1.1.0 via ESPHome Builder) to
+get the full effect of the "stop" improvements; the two halves
 work best together.
 
 - **"Stop" now works through the whole reply AND the after-reply listening
@@ -311,15 +402,16 @@ device's YAML in ESPHome Builder (everything else — your name, secrets,
 ```yaml
 packages:
   realtime:
-    url: https://github.com/TristanBrotherton/voicepe-realtime-firmware
-    ref: main
-    files: [home-assistant-voice.realtime.yaml]
+    url: https://github.com/TheOnlyHyland/True-Family-Voice-Firmware
+    ref: "0.19.0"
+    files:
+      - home-assistant-voice.realtime.yaml
     refresh: 0s
 ```
 
 Current templates for reference:
-[esphome-builder.dhcp.yaml](https://github.com/TristanBrotherton/voicepe-realtime-firmware/blob/main/esphome-builder.dhcp.yaml) ·
-[esphome-builder.static-ip.yaml](https://github.com/TristanBrotherton/voicepe-realtime-firmware/blob/main/esphome-builder.static-ip.yaml)
+[esphome-builder.dhcp.yaml](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.dhcp.yaml) ·
+[esphome-builder.static-ip.yaml](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.static-ip.yaml)
 
 ## 0.4.26
 

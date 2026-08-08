@@ -91,7 +91,7 @@ def register_memory_tools(llm, get_speaker_name: Optional[Callable[[], Optional[
         lines = _load()
         lines.append(f"- {note} (from {who}, {time.strftime('%Y-%m-%d')})")
         _save(lines)
-        logger.info(f"🧠 remembered ({who}): {note}")
+        logger.info("🧠 memory recorded")
         await params.result_callback({"status": "remembered",
                                       "note": "Active in all future conversations; confirm briefly."})
 
@@ -105,7 +105,7 @@ def register_memory_tools(llm, get_speaker_name: Optional[Callable[[], Optional[
         keep = [l for l in lines if pat.lower() not in l.lower()]
         removed = len(lines) - len(keep)
         _save(keep)
-        logger.info(f"🧠 forgot {removed} note(s) matching '{pat}' ({who})")
+        logger.info(f"🧠 forgot {removed} matching note(s)")
         await params.result_callback({"removed": removed})
 
     async def _list(params) -> None:

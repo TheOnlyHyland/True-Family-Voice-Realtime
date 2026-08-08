@@ -64,18 +64,18 @@ configuration:
   max_output_tokens:
     name: "🗣️ Model & voice · Maximum answer length"
     description: >-
-      Caps how long an answer may get, in tokens (≈ 0.75 words each).
-      0 = no cap. Set e.g. 1024 if it sometimes rambles on; too low cuts
-      answers off mid-sentence.
+      Caps how long an answer may get, in tokens (≈ 0.75 words each). The
+      finite 1200-token default bounds runaway answers and cost without
+      affecting normal replies. Too low cuts answers off mid-sentence.
 
   # --- 💬 Conversation ---
   follow_up_listen_seconds:
-    name: "💬 Conversation · Follow-up listening (seconds)"
+    name: "💬 Conversation · Follow-up mode (must be 0)"
     description: >-
-      After an answer the device keeps listening this long, so you can simply
-      keep talking — no wake word needed. The LED ring shows the listening
-      colour while it waits. 8 feels natural; 0 turns it off (wake word
-      before every question).
+      Version 0.21.0 requires 0: ordinary replies close the microphone, and the
+      model may request at most one no-wake window per physical wake, only for
+      a necessary question. A saved value above 0 now blocks startup; automatic
+      follow-up after every reply is not available in this rapid pilot.
   follow_up_open_delay_ms:
     name: "💬 Conversation · Follow-up mic delay (ms)"
     description: >-
@@ -177,10 +177,28 @@ configuration:
   mcp_tool_allowlist:
     name: "🏠 Home Assistant · Tool allow-list"
     description: >-
-      Comma-separated list of control tools the assistant may use; empty =
-      all of them. With the built-in MCP server you can leave this empty.
-      Mainly useful with the ha-mcp add-on (80+ tools) to keep conversations
-      fast and cheap.
+      Required comma-separated list of exact, case-sensitive MCP tools the
+      assistant may use. Empty fails closed and exposes no MCP tools. To retain
+      whole-home control after upgrading, copy every currently desired Home
+      Assistant and custom-script tool into this list before deployment.
+  nearby_media_players:
+    name: "🏠 Home Assistant · Nearby media players"
+    description: >-
+      Required comma-separated media_player entity IDs near this Voice PE,
+      maximum 16. For this deployment, include the exact Living Room TV and
+      Living Room Chromecast entity IDs before starting 0.21.0.
+      Before reserving and again immediately before opening a requested no-wake
+      follow-up, the add-on checks only these exact entities. Playing, buffering,
+      on, paused, unavailable, unknown, denied, malformed, or timed-out state
+      keeps the microphone closed; conversation context remains available after
+      the next wake word. Empty fails startup instead of disabling the fence.
+      This list is never exposed to the model as a state tool.
+  enable_voice_memory:
+    name: "🏠 Home Assistant · Enable persistent voice memory"
+    description: >-
+      Opts in to the remember, forget, and list_memories tools and reads local
+      standing notes into each model session. Off by default, like audio
+      recording, because spoken memory persists under /share across rebuilds.
 
   # --- ⚙️ Advanced ---
   websocket_port:
@@ -201,8 +219,8 @@ configuration:
       How many complete user-led turns the assistant remembers. Tool calls and
       their results stay together. More = better memory, but every answer
       re-bills the whole history, so long chats get expensive and can hit
-      OpenAI rate limits. 12 is a good balance; 0 disables managed history and
-      starts fresh after an OpenAI session replacement.
+      OpenAI rate limits. 12 is a good balance. Version 0.21.0 requires a value
+      above 0 so a necessary clarification survives a fresh wake.
   transcription_model:
     name: "⚙️ Advanced · Transcript model"
     description: >-
@@ -221,8 +239,8 @@ configuration:
     description: >-
       How the end of your question is detected. Normally leave this UNSET:
       the assistant then understands when your sentence is finished
-      (semantic_vad). "server_vad" is the old silence-timer method and
-      automatically disables managed Conversation memory.
+      (semantic_vad). Version 0.21.0 rejects the old "server_vad" silence-timer
+      method at startup.
   vad_threshold:
     name: "⚙️ Advanced · server_vad: loudness threshold"
     description: >-
@@ -254,26 +272,12 @@ configuration:
       Short name for the room/device this instance serves (e.g. kitchen).
       Used in the Home Assistant sensor names and to route agent
       announcements back to the right device. One add-on instance per device.
-  wake_sound_entity:
-    name: "🧩 Fork · Wake sound switch entity"
-    description: >-
-      Optional switch entity that enables/disables the device's wake chime,
-      so voice enrollment can silence it during guided training.
   timer_ring_entity:
     name: "🧩 Fork · Timer ring switch entity"
     description: >-
       The device's timer_ringing switch entity (e.g.
       switch.voice_pe_timer_ringing). Voice timers announce first, then ring
       this if unacknowledged. Leave empty to disable ringing.
-  enrollment_phrase:
-    name: "🧩 Fork · Enrollment wake phrase"
-    description: >-
-      The wake phrase practiced during guided voice enrollment. Set it to
-      your actual wake word (default: hey leonard).
-  enrollment_tts_voice:
-    name: "🧩 Fork · Enrollment coach voice"
-    description: >-
-      OpenAI TTS voice used by the enrollment audio coach (default fable).
   openclaw_url:
     name: "🧩 Fork · Agent bridge URL"
     description: >-
@@ -291,4 +295,5 @@ configuration:
     name: "🧩 Fork · Announce token"
     description: >-
       Bearer token protecting the announce endpoint. Generate a long random
-      string; anyone on your LAN with this token can speak through the device.
+      string and store it like a password; the Configuration tab masks this
+      field. Anyone on your LAN with this token can speak through the device.

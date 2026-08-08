@@ -1,8 +1,9 @@
 # Voice PE Realtime — Add-on Documentation
 
 This add-on runs an **OpenAI Realtime** voice session (default model
-`gpt-realtime-2.1`) and bridges it to Home Assistant control, web search, voice
-timers, speaker recognition, and persistent voice-taught memory. It is the
+`gpt-realtime-2.1`) and bridges it to explicitly allow-listed Home Assistant
+control, web search, voice timers, speaker recognition, and opt-in persistent
+voice-taught memory. It is the
 backend half of a two-part project; the front half is custom **firmware for the
 Home Assistant Voice PE** device (see
 [Firmware](#firmware-home-assistant-voice-pe-only) below).
@@ -19,6 +20,11 @@ complete option reference, agent integration, and FAQ:
 <https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/tree/main/docs>.
 This page covers setup and day-to-day essentials.
 
+> **Mandatory 0.21 compatibility order:** install and verify Voice PE firmware
+> 0.19.0 or newer before starting backend 0.21.0. For upgrades, firmware first
+> and backend second. For rollback, backend first and firmware second. Reversing
+> either order is unsupported.
+
 ---
 
 ## 1. Install the add-on
@@ -27,9 +33,9 @@ This page covers setup and day-to-day essentials.
 2. Top-right **⋮ → Repositories**, add:
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
 3. Find **True Family Voice Realtime** in the store and click **Install**.
-   (There is no prebuilt image — Home Assistant builds it locally the first time,
-   which takes a few minutes.)
-4. Open the add-on's **Configuration** tab to set it up (next sections).
+   Home Assistant pulls the CI-verified image for this exact add-on version.
+4. Open the add-on's **Configuration** tab to set it up, but do not start 0.21.0
+   until compatible firmware is installed.
 
 **One add-on instance serves one Voice PE device.** For multiple devices, run one
 instance per device (a local-add-on copy with its own `slug`, `name` and
@@ -66,9 +72,11 @@ You get a small fixed set of Assist tools (`HassTurnOn`, `HassTurnOff`,
 `HassLightSet`, `GetLiveContext`, `GetDateTime`, …). **`GetLiveContext`** is the
 "what's the current state?" tool — keep it; it's what answers *"is the light on?"*.
 
-**`mcp_tool_allowlist`** (optional): a comma-separated whitelist of tool names. Leave
-blank to expose all, or trim to just what you use, e.g.:
-`HassTurnOn,HassTurnOff,HassLightSet,GetLiveContext,GetDateTime`
+**`mcp_tool_allowlist` is required.** Populate it with every exact,
+case-sensitive Home Assistant and custom-script tool this deployment should keep.
+Empty exposes no MCP tools. The backend intersects the configured list with the
+current session schema and checks the exact name again at dispatch, so do not
+replace your complete deployment list with a shortened documentation example.
 
 ## 4. Recommended starting settings
 
@@ -82,20 +90,30 @@ option has plain-language inline help.
 |---|---|---|
 | `openai_model` | `gpt-realtime-2.1` | newest speech-to-speech model |
 | `openai_voice` | `marin` | `marin`/`cedar` are the newest voices |
+| `max_output_tokens` | `1200` | finite answer and cost bound |
 | `transcription_language` | *(blank)* | auto-detects for bounded context replay; set an ISO code (e.g. `nl`) to lock it |
 | `instructions` | *(English default)* | the system prompt; swap the LANGUAGE line for your language |
-| `follow_up_listen_seconds` | `8` | mic stays open this long so you can answer back |
+| `follow_up_listen_seconds` | `0` | ordinary replies close; one necessary model-requested no-wake follow-up is allowed per physical wake |
+| `mcp_tool_allowlist` | *(blank: no MCP tools)* | must contain the complete desired exact tool list before deployment |
+| `nearby_media_players` | *(blank: startup blocked)* | required exact Living Room TV and Chromecast `media_player` IDs; active, paused, missing, or uncertain state suppresses a requested open-mic window |
 | `follow_up_open_delay_ms` | `700` | echo guard before the follow-up mic opens; lower = snappier but risks ghost turns |
 | `wake_open_delay_ms` | `700` | the same echo guard right after the wake chime |
 | `vad_eagerness` | `low` | waits longest before deciding you're done talking |
 | `playback_prebuffer_ms` | `150` | raise to ~250 if you hear crackle; 0 = play immediately |
-| `max_context_messages` | `12` | complete user-led turns retained; `0` disables managed reconnect history |
+| `max_context_messages` | `12` | complete user-led turns retained; version 0.21.0 requires a value above `0` |
 | `enable_web_search` | `true` | online lookups; set `false` to disable |
+| `enable_voice_memory` | `false` | explicit opt-in for persistent memory tools and memory-file reads |
 | `web_search_model` | `gpt-5.5` | best-quality search model; mini/nano are cheaper |
 
+> **Rapid-pilot limitation:** the device WebSocket is unauthenticated plaintext.
+> Protocol nonces reject stale transactions; they are not device authentication
+> or encryption. Keep the service on a trusted isolated LAN and never expose its
+> WebSocket port to an untrusted network or the internet.
+
 The legacy `server_vad` turn-detection fields live at the bottom of ⚙️ Advanced and
-only appear when you enable **"Show unused optional configuration options"** —
-leave them unset unless you have a specific reason.
+only appear when you enable **"Show unused optional configuration options"**.
+Leave them unset: version 0.21.0 requires managed `semantic_vad` and rejects
+`server_vad` at startup.
 
 The **complete option reference** (every option, purpose, default, when to change
 it) is in the
@@ -127,38 +145,36 @@ Setup: set **`timer_ring_entity`** to your device's exposed
 `switch.<device>_timer_ringing` entity. Without it, the assistant will say timers
 are unavailable. Timers survive the hourly session refresh but not add-on restarts.
 
-## 7. Speaker awareness & voice enrollment
+## 7. Speaker awareness
 
 Set `speaker_male_name` / `speaker_female_name` and each wake is tagged with the
-likely speaker (pitch heuristic for a one-male-one-female household); enroll voice
-prints for true per-person identity. The assistant can address people by name, and
+likely speaker (pitch heuristic for a one-male-one-female household). Existing,
+administrator-provisioned voice prints can provide per-person identity. The
+assistant can address people by name, and
 `male_only_tools` (comma-separated tool names) are enforced below the model — a
 gated tool politely refuses unless the gated voice was identified. Convenience,
 not biometric security. Leave names empty to disable.
 
-**Enrollment**: say *"train my voice"* (any similar phrasing). The paired firmware
-pins the mic open (wake/stop detection disarmed, cyan breathing LED, 10-minute cap,
-center button aborts) while an automated audio coach guides 25 varied repetitions
-of `enrollment_phrase` plus 90 seconds of natural speech. The recording is written
-to `/share/voice-enrollment/<name>_<timestamp>.wav` (16 kHz mono PCM) and never
-leaves your machine — OpenAI hears nothing during enrollment. Use the recordings
-for custom wake-word training and voice prints
-(`python3 -m app.build_voiceprint <name> <recording>` → `/share/voice-prints/`).
-Options: `enrollment_phrase`, `enrollment_tts_voice`, `wake_sound_entity`
-(auto-mutes the wake chime during sessions).
+**Backend enrollment is not available in 0.21.0.** The add-on exposes no model,
+device, configuration, or administrator control that can start microphone
+enrollment. The rapid pilot only consumes prints that an administrator already
+provisioned under `/share/voice-prints/`; creating new reference audio and prints
+is an offline task outside this release.
 
 Full guide:
-[Speaker recognition & voice enrollment](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/features.md#speaker-recognition--voice-enrollment).
+[Speaker recognition](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/features.md#speaker-recognition).
 
 ## 8. Voice-instructed memory
 
-Say "remember that..." / "from now on..." and the note becomes a standing
+First set `enable_voice_memory: true`. Then say "remember that..." / "from now
+on..." and the note becomes a standing
 instruction in every future conversation (it takes effect at the next session —
 minutes, at most an hour). "Forget about..." removes matching notes; "what do you
 remember" reads them back. Notes are stored locally in
 `/share/voice-memory/memory.md` (plain markdown — you can edit it by hand), capped
 at 60 notes, each attributed to the household member whose voice gave it. Guests
 and unidentified voices cannot change memory.
+With the default `false`, the tools are absent and the memory file is not read.
 
 ## 9. Agent integration (optional)
 
@@ -169,6 +185,8 @@ and unidentified voices cannot change memory.
 that kills long agent turns. You also get **`recall_memory`**: the bridge answers
 `{"recall": "<query>"}` with `{"matches": [...]}` — instant, deterministic recall
 (contacts, dates, preferences) with the full agent turn as fallback.
+Treat `openclaw_url` as a secret if its path contains a hook token; the backend
+redacts that configured URL and path from application and HTTP-client logs.
 
 **`announce_port` + `announce_token`** (set both): a LAN route *back to the
 device*. `POST http://<ha-host>:<announce_port>/announce` with
@@ -176,7 +194,8 @@ device*. `POST http://<ha-host>:<announce_port>/announce` with
 message aloud through the device's guarded TTS lane — this is what lets a
 delegated task report back by voice minutes later. Returns 503 when no device is
 connected, so callers can fall back to a text channel. Generate a long random
-token; the add-on runs on the host network, so the token is the lock.
+token; the add-on runs on the host network, so the token is the lock. The
+Configuration tab masks `announce_token` as a password.
 
 The integration is agent-agnostic — any agent behind a small bridge works. Full
 contracts and examples:
@@ -187,19 +206,20 @@ contracts and examples:
 Every wake's opening audio is archived locally (auto-pruned, newest 500). Flag a
 false trigger by saying *"that was a false alarm"*, **double-pressing the center
 button**, or automatically when a wake is silenced without speech. Labeled
-captures become hard negatives for wake-word retraining — see the
-[retrain flywheel](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/features.md#the-retrain-flywheel).
+captures remain local hard negatives for a deliberate external offline
+wake-word retraining workflow.
 
 Set **`instance_name`** (e.g. `kitchen`) to publish
 `sensor.voicepe_kitchen_speaker`, `_active_timers`, `_wakes_today`,
-`_false_wakes_today` and `binary_sensor.voicepe_kitchen_enrollment_active` for
-dashboards and automations.
+`_false_wakes_today`, `_openai_cost_today`, and `_voice_prints` for dashboards
+and automations.
 
 ## 11. Reading the logs
 
-The add-on log shows `🤖 assistant:` (reply text), `📞 phase ->` (device state), tool calls, and
-`🔌 …reconnecting` / `✅ reconnected` on a connection recovery. View it on the add-on
-**Log** tab.
+The add-on log shows bounded assistant-completion metadata, `📞 phase ->`
+(device state), tool names, and `🔌 …reconnecting` / `✅ reconnected` on a
+connection recovery. Conversation text, user payloads, and tool arguments are
+not logged. View it on the add-on **Log** tab.
 
 ## Known limitations
 
@@ -225,9 +245,9 @@ thin client (it streams mic audio here and plays the reply). That firmware:
 - lives in its own **public** repository:
   **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**.
 
-You flash it once via a tiny per-device "stub" in ESPHome Builder; after that,
-firmware updates are **one click** — no tokens, no copy-pasting. The full
-from-scratch guide (flashing + adopting + first conversation) is the
+You flash it via a tiny per-device stub in ESPHome Builder. Its two immutable
+release refs do not auto-discover updates; advance both deliberately only after
+reviewing the newer release. The full from-scratch guide is the
 [Getting Started guide](https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/blob/main/docs/getting-started.md).
 
 ## Credits

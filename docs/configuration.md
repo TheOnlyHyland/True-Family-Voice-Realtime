@@ -10,8 +10,13 @@ Two places hold configuration:
 > The add-on UI renders every text option as a single-line input. For long text like
 > `instructions`, use the Configuration tab's **⋮ → Edit in YAML** for a real editor.
 
-> The `*_custom` fields and the legacy `server_vad` fields are hidden until you toggle
+> The `*_custom` fields and legacy `server_vad` fields are hidden until you toggle
 > **"Show unused optional configuration options"** at the bottom of the tab.
+> Version 0.21.0 requires the default `semantic_vad`; selecting `server_vad`
+> blocks startup.
+
+> **Version 0.21 rollout order:** firmware 0.19.0 or newer first, backend second.
+> Rollback order is backend first, firmware second. Do not reverse these orders.
 
 ## 🔑 Basics
 
@@ -30,13 +35,13 @@ Two places hold configuration:
 | `openai_voice` | `marin` | The voice it speaks with. `marin`/`cedar` are the newest and most natural; also `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`. Restart the add-on after changing — a running conversation keeps its voice. |
 | `openai_voice_custom` | *(hidden)* | Any valid OpenAI voice name, used when `openai_voice` is `custom`. |
 | `openai_speed` | `1.0` | Speaking pace, `0.25`–`1.5`. Changes pace only, not the words. |
-| `max_output_tokens` | `0` | Caps answer length in tokens (≈ 0.75 words each). `0` = no cap. Set ~`1024` if it rambles; too low cuts answers off mid-sentence. |
+| `max_output_tokens` | `1200` | Finite cap on answer length (≈ 0.75 words per token). The default bounds runaway replies and cost without affecting normal answers; too low can cut an answer off mid-sentence. |
 
 ## 💬 Conversation
 
 | Option | Default | Purpose / when to change |
 |---|---|---|
-| `follow_up_listen_seconds` | `8` | How long the mic stays open after each reply, so you can keep talking without the wake word. `0` disables follow-ups. |
+| `follow_up_listen_seconds` | `0` | Must remain `0` in version 0.21.0. Ordinary replies close the mic and the model can request at most one no-wake window per physical wake, only for a necessary question. A saved nonzero value fails startup instead of enabling legacy automatic mode. |
 | `follow_up_open_delay_ms` | `700` | Echo guard: pause between the end of a reply and the mic re-opening, so the speaker's tail can't become a ghost question. Lower (300–500) is snappier but risks the assistant answering its own echo — raise it back if it "answers nobody" or repeats itself. |
 | `wake_open_delay_ms` | `700` | The same echo guard after the wake chime, before the mic opens. Lower for a snappier wake; raise if a wake sometimes triggers an answer to nothing. |
 | `vad_eagerness` | `low` | How quickly it decides you're done talking. `low` waits patiently (best if you pause mid-sentence), `high` answers faster but may cut you off, `auto` lets OpenAI decide. |
@@ -64,17 +69,26 @@ Two places hold configuration:
 | `speaker_male_name` | *(empty)* | Name to use when a male voice is detected. Leave both name fields empty to disable speaker detection. |
 | `speaker_female_name` | *(empty)* | Name to use when a female voice is detected. |
 | `male_only_tools` | *(empty)* | Comma-separated tool names that only execute for the male voice. Enforced below the model — it can't be talked around. Convenience gating, not biometric security. |
-| `wake_sound_entity` | *(empty)* | The device's wake-chime switch entity. When set, the chime is auto-muted during enrollment sessions so the coach's instructions stay audible. |
 | `timer_ring_entity` | *(empty)* | The device's exposed `switch.<device>_timer_ringing` entity. Empty = voice timers unavailable (the assistant will say so). |
 | `instance_name` | *(empty)* | Sensor prefix, e.g. `kitchen` → `sensor.voicepe_kitchen_*`. Also sent to your agent as the `room` for report-backs. Empty = `device`. |
-| `enrollment_phrase` | `hey jarvis` | The wake phrase the enrollment coach asks you to repeat. **Set this to the wake word you actually use / plan to train.** |
-| `enrollment_tts_voice` | `fable` | The voice of the enrollment coach (any OpenAI `/v1/audio/speech` voice). |
 | `ha_mcp_url` | *(empty)* | Leave empty (recommended): uses HA's built-in MCP Server integration. Only set a URL if you run the separate ha-mcp add-on. |
 | `longlived_token` | *(empty)* | Leave empty (recommended): the add-on uses its own supervisor permission. Only paste a long-lived token (HA profile → Security) if startup logs a 401/403 on `/core/api/mcp`. |
-| `mcp_tool_allowlist` | *(empty)* | Comma-separated whitelist of MCP tool names; empty = all. The built-in server's set is already small; mainly useful with ha-mcp (80+ tools) to keep sessions fast and cheap. |
+| `mcp_tool_allowlist` | *(empty: no MCP tools)* | Required comma-separated list of exact, case-sensitive MCP tool names. Empty fails closed. To preserve whole-home behavior, populate the complete desired list before deployment, including every Home Assistant control/read tool and exposed custom script currently in use; do not replace that deployment list with a shortened example. A call is also checked against the tools exposed in the current session at dispatch time. |
+| `nearby_media_players` | *(empty: startup blocked)* | Required list of up to 16 exact `media_player` entity IDs near this Voice PE. This deployment must include the exact Living Room TV and Living Room Chromecast IDs. Before a requested no-wake follow-up, the backend checks only these entities through authenticated HA REST, then checks again after firmware READY while the mic is still closed and before COMMIT. Playing, buffering, on, paused, unavailable, unknown, denied, malformed, timed-out, or empty scope keeps the mic closed. The list is not exposed as a model tool. |
+| `enable_voice_memory` | `false` | Explicit privacy opt-in for the persistent `remember`, `forget`, and `list_memories` tools and for loading `/share/voice-memory/memory.md` into model instructions. Disabled sessions neither expose those tools nor read the file. |
 | `openclaw_url` | *(empty)* | Direct endpoint of your agent bridge. Enables the `ask_openclaw` escalation tool (called directly, ~2.5-minute budget, bypassing HA MCP's 60 s cap) and the instant `recall_memory` tool. Contract in [Agent Integration](agent-integration.md). |
 | `announce_port` | `0` | Port for the announce endpoint — a LAN route back to the device so an agent can speak in the room. Enabled only when **both** this and `announce_token` are set. |
-| `announce_token` | *(empty)* | Bearer token for the announce endpoint. The add-on runs on the host network, so the token is the lock — generate a long random one. |
+| `announce_token` | *(empty)* | Password-masked bearer token for the announce endpoint. The add-on runs on the host network, so the token is the lock — generate a long random one and treat it as a secret. |
+
+> **Rapid-pilot network limitation:** the Voice PE WebSocket protocol is
+> unauthenticated plaintext. Nonces prevent stale transaction reuse but do not
+> authenticate a device or encrypt traffic. Run it only on a trusted, isolated
+> LAN; do not expose the WebSocket port to untrusted networks or the internet.
+
+> **Accepted inherited privileges:** 0.21.0 still uses host networking, the Home
+> Assistant API credential, and read-write `/share`. Those process privileges are
+> not a model authorization policy. MCP authority remains limited to the exact
+> configured allow-list and the exact tool schema exposed in the current session.
 
 ## ⚙️ Advanced
 
@@ -82,13 +96,13 @@ Two places hold configuration:
 |---|---|---|
 | `websocket_port` | `8080` | The port the Voice PE connects to. Must match the `va_url` in the device firmware. Change only on a port clash (and for second devices — see [multi-device](getting-started.md#part-6--multiple-devices)); `8081` is used by dev builds. |
 | `session_reuse_timeout_seconds` | `300` | If the device reconnects within this window after a Wi-Fi blip, the conversation resumes. A full add-on restart starts fresh. |
-| `max_context_messages` | `12` | Complete user-led turns retained across the hourly OpenAI reconnect; tool calls and results stay together. `0` disables managed history. A positive value requires `semantic_vad`. |
+| `max_context_messages` | `12` | Complete user-led turns retained across the hourly OpenAI reconnect; tool calls and results stay together. Version 0.21.0 requires a value above `0` so a necessary clarification survives a fresh wake. |
 | `transcription_model` | `gpt-4o-transcribe` | Creates private bounded text for reconnect replay. Does **not** affect understanding — the main model hears your audio natively. Also: `gpt-realtime-whisper`, `gpt-4o-mini-transcribe`, `whisper-1`. |
 | `transcription_model_custom` | *(hidden)* | Custom transcription model id. |
-| `turn_detection_type` | *(unset)* | Leave unset: `semantic_vad` is required for managed bounded history. Selecting legacy `server_vad` automatically disables managed history with a warning. |
-| `vad_threshold` | *(unset)* | server_vad only: loudness to count as speech, 0–1 (default 0.5). Higher = fewer false triggers from background noise. |
-| `vad_prefix_padding_ms` | *(unset)* | server_vad only: audio kept from just before speech was detected so your first word isn't clipped (default 300). |
-| `vad_silence_duration_ms` | *(unset)* | server_vad only: how long a silence ends your turn (default 800). Raise if you get cut off while pausing. |
+| `turn_detection_type` | *(unset)* | Leave unset. The 0.21.0 rapid pilot requires managed `semantic_vad`; selecting legacy `server_vad` blocks startup. |
+| `vad_threshold` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.21.0 startup. |
+| `vad_prefix_padding_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.21.0 startup. |
+| `vad_silence_duration_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.21.0 startup. |
 
 ## 🔍 Debug
 
@@ -96,13 +110,16 @@ Two places hold configuration:
 |---|---|---|
 | `enable_recording` | `false` | Saves mic and speaker audio to files inside the add-on, for troubleshooting only. Also saves speaker-probe captures for offline threshold calibration. Leave off normally. |
 
+Backend microphone enrollment is deliberately absent from the 0.21 rapid pilot.
+There are no enrollment options or model, device, or administrator start controls.
+
 ---
 
 ## Firmware substitutions
 
 Set these in your per-device stub in ESPHome Builder (the stub overrides the
 firmware's defaults). The secrets (`wifi_ssid`, `wifi_password`, `ota_password`,
-`api_key`) are passed as substitutions because a remote package can't use
+`api_encryption_key`) are passed as substitutions because a remote package can't use
 `!secret` directly.
 
 | Substitution | Default | Purpose / when to change |
@@ -111,7 +128,7 @@ firmware's defaults). The secrets (`wifi_ssid`, `wifi_password`, `ota_password`,
 | `friendly_name` | `Home Assistant Voice` | Display name in Home Assistant. |
 | `wifi_ssid` / `wifi_password` | *(from secrets)* | Your Wi-Fi credentials. |
 | `ota_password` | *(from secrets)* | Protects over-the-air flashes. Use the one ESPHome generated at adopt time (or pick one on a fresh flash). |
-| `api_key` | *(from secrets)* | ESPHome Noise/API encryption key — 32 random bytes, base64 (`openssl rand -base64 32`). Not an HA token, not your OpenAI key. |
+| `api_encryption_key` | *(from secrets)* | ESPHome Noise/API encryption key — 32 random bytes, base64 (`openssl rand -base64 32`). Not an HA token, not your OpenAI key. |
 | `va_url` | `ws://homeassistant.local:8080/` | WebSocket endpoint of the backend add-on. Change if your HA host has a different name/IP or the add-on uses another port, e.g. `ws://192.168.1.x:8082/`. No auth token — it's a LAN-local service. |
 | `wake_word_model` | `models/hey_leonard.json` (this repo) | The microWakeWord model URL. Point it at your own trained model, or at a stock model. Runtime switching between the built-in options needs no reflash — use the "Wake word" dropdown in HA. |
 | `default_wake_word` | `Hey Leonard` | Which entry of the HA "Wake word" dropdown is selected on first boot (`Hey Leonard`, `Hey Jarvis`, `Okay Nabu`). |

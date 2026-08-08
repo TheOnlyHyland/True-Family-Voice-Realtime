@@ -49,11 +49,11 @@ async def start_announce_server(port: int, token: str, announcer, is_connected) 
         _recent[:] = [(t, m) for t, m in _recent if now - t < DUPLICATE_WINDOW_S]
         for _, prev in _recent:
             if difflib.SequenceMatcher(None, norm, prev).ratio() >= DUPLICATE_RATIO:
-                logger.info(f"📢 duplicate announce suppressed: {message[:60]}")
+                logger.info("📢 duplicate announce suppressed")
                 return web.json_response({"status": "duplicate_suppressed",
                                           "note": "already announced — do not retry or re-announce"})
         _recent.append((now, norm))
-        logger.info(f"📢 announce: {message[:80]}")
+        logger.info("📢 announcement accepted")
         try:
             await announcer(message)
         except Exception as e:

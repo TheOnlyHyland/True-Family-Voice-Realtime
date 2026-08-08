@@ -2,9 +2,8 @@
 
 The Home Assistant Voice PE firmware (maxmaxme `va_client` component) drives its
 LED ring, mic-streaming gate and a 7 s no-speech watchdog from `phase` JSON
-messages sent by the backend:
-
-    {"type": "phase", "value": "listening" | "thinking" | "replying" | "idle"}
+messages sent by the backend. The supplied send callback binds each value to the
+active session nonce and wake generation before constructing the firmware control.
 
 Without these messages the device aborts each turn after the watchdog fires, so
 emitting them is required (not just cosmetic). This processor maps Pipecat's
@@ -130,6 +129,9 @@ class PhaseEmitter(FrameProcessor):
         send_phase,
         idle_debounce_s: float = None,
         before_idle=None,
+        before_forced_idle=None,
+        on_bot_started=None,
+        capture_idle_context=None,
         **kwargs,
     ):
         """
@@ -145,6 +147,9 @@ class PhaseEmitter(FrameProcessor):
         super().__init__(**kwargs)
         self._send_phase = send_phase
         self._before_idle = before_idle
+        self._before_forced_idle = before_forced_idle
+        self._on_bot_started = on_bot_started
+        self._capture_idle_context = capture_idle_context
         if idle_debounce_s is None:
             try:
                 idle_debounce_s = float(os.environ.get("PHASE_IDLE_DEBOUNCE_MS", "1500")) / 1000.0
@@ -162,8 +167,8 @@ class PhaseEmitter(FrameProcessor):
         # note_wake() resets this to False. A real UserStartedSpeaking sets it
         # True. A UserStoppedSpeaking with this still False is a server-VAD
         # segment from a PREVIOUS turn closing late (the reply gated the mic mid-
-        # utterance, so the VAD never saw the stop) — committing it auto-creates
-        # a garbage response to an empty turn. We then suppress the thinking and
+        # utterance, so the VAD never saw the stop) — committing it can trigger a
+        # garbage response to an empty turn. We then suppress the thinking and
         # cancel that racing response via the kill-window callback. Defaults True
         # so nothing is suppressed before the first wake signal (and so old
         # firmware that doesn't send `wake` degrades to a no-op).
@@ -198,6 +203,16 @@ class PhaseEmitter(FrameProcessor):
         self._cancel_pending_idle()
         self._cancel_watchdog()
         self._suppress_thinking = True
+        if self._before_forced_idle is not None:
+            try:
+                await self._before_forced_idle()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "⚠️ conversation control before forced idle failed: %r",
+                    error,
+                )
         if reason:
             logger.warning(f"📞 forcing phase idle ({reason[:90]})")
         if force_delivery and self._current == "idle":
@@ -251,7 +266,7 @@ class PhaseEmitter(FrameProcessor):
         self._cancel_watchdog()
         self._watchdog_task = asyncio.create_task(self._thinking_watchdog())
 
-    async def _emit_idle_after_debounce(self) -> None:
+    async def _emit_idle_after_debounce(self, finalizer_context=None) -> None:
         try:
             await asyncio.sleep(self._idle_debounce_s)
         except asyncio.CancelledError:
@@ -271,11 +286,16 @@ class PhaseEmitter(FrameProcessor):
             return
         if self._before_idle is not None:
             try:
-                await self._before_idle()
+                if self._capture_idle_context is None:
+                    proceed = await self._before_idle()
+                else:
+                    proceed = await self._before_idle(finalizer_context)
+                if proceed is False:
+                    return
             except asyncio.CancelledError:
                 return
             except Exception as error:
-                logger.warning("⚠️ graceful close before idle failed: %r", error)
+                logger.warning("⚠️ conversation control before idle failed: %r", error)
         await self._emit("idle")
 
     async def _thinking_watchdog(self) -> None:
@@ -341,7 +361,7 @@ class PhaseEmitter(FrameProcessor):
             elif not self._speech_since_wake:
                 # A: no real speech since the last wake/flush → this stop is a
                 # dangling pre-wake server-VAD segment closing late. Suppress the
-                # thinking AND cancel the garbage response the server auto-creates
+                # thinking AND cancel the garbage response the turn gate can create
                 # for the (empty) committed turn.
                 logger.info("📞 'thinking' suppressed + kill armed — dangling VAD (no speech since wake)")
                 if self._on_dangling_stop is not None:
@@ -356,11 +376,23 @@ class PhaseEmitter(FrameProcessor):
             self._suppress_thinking = False
             self._cancel_pending_idle()
             self._cancel_watchdog()
+            if self._on_bot_started is not None:
+                try:
+                    self._on_bot_started()
+                except Exception as error:
+                    logger.warning("⚠️ bot-start callback failed: %r", error)
             await self._emit("replying")
         elif isinstance(frame, BotStoppedSpeakingFrame):
             # Don't go idle immediately — TTS comes in segments. Only emit idle
             # if the bot stays silent for the debounce window.
             self._cancel_pending_idle()
-            self._idle_task = asyncio.create_task(self._emit_idle_after_debounce())
+            finalizer_context = (
+                self._capture_idle_context()
+                if self._capture_idle_context is not None
+                else None
+            )
+            self._idle_task = asyncio.create_task(
+                self._emit_idle_after_debounce(finalizer_context)
+            )
 
         await self.push_frame(frame, direction)

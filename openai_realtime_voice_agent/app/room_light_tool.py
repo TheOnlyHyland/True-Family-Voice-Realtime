@@ -340,8 +340,7 @@ async def turn_on_room_lights(
                 )
             except Exception:
                 logger.warning(
-                    "Home Assistant room-light request failed for room=%s step=%s",
-                    room,
+                    "Home Assistant room-light request failed at step=%s",
                     completed_steps + 1,
                 )
                 return _request_error(
@@ -353,8 +352,7 @@ async def turn_on_room_lights(
 
             if not 200 <= response.status_code < 300:
                 logger.warning(
-                    "Home Assistant rejected room-light request for room=%s step=%s",
-                    room,
+                    "Home Assistant rejected room-light request at step=%s",
                     completed_steps + 1,
                 )
                 return _request_error(
