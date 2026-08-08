@@ -3,7 +3,6 @@
 Per-instance sensors (INSTANCE_NAME option, e.g. 'kitchen'):
   sensor.voicepe_<inst>_speaker        james/mary/unknown/none (+score/method)
   sensor.voicepe_<inst>_active_timers  count (+next-expiry attrs)
-  binary_sensor.voicepe_<inst>_enrollment_active
   sensor.voicepe_<inst>_wakes_today / _false_wakes_today
 
 States are POSTed via the supervisor core API — ad-hoc entities, ideal for
@@ -73,7 +72,7 @@ class SensorPublisher:
         })
 
     async def voice_prints(self):
-        """Publish enrolled voice prints so users can SEE enrollment worked."""
+        """Publish administrator-provisioned voice prints."""
         import glob, json as _json
         names = []
         for f in sorted(glob.glob("/share/voice-prints/*.json")):
@@ -86,7 +85,7 @@ class SensorPublisher:
         configured = [n for n in (os.environ.get("SPEAKER_MALE_NAME", ""),
                                   os.environ.get("SPEAKER_FEMALE_NAME", "")) if n.strip()]
         await _post(f"sensor.voicepe_{_INST}_voice_prints", len(names), {
-            "friendly_name": f"Voice PE {_INST} enrolled voice prints",
+            "friendly_name": f"Voice PE {_INST} voice prints",
             "enrolled": [n["name"] for n in names],
             "chunks": {n["name"]: n["chunks"] for n in names},
             "configured_names": configured,
@@ -111,11 +110,5 @@ class SensorPublisher:
             attrs["next_label"] = t[0]["label"]
             attrs["next_seconds_left"] = min(x["seconds_left"] for x in t)
         await _post(f"sensor.voicepe_{_INST}_active_timers", len(t), attrs)
-
-    async def enrollment(self, active: bool):
-        await _post(f"binary_sensor.voicepe_{_INST}_enrollment_active",
-                    "on" if active else "off",
-                    {"friendly_name": f"Voice PE {_INST} enrollment active"})
-
 
 PUBLISHER = SensorPublisher()

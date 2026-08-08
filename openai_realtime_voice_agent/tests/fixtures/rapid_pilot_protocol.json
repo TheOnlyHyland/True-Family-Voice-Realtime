@@ -1,0 +1,117 @@
+{
+  "backend_version": "0.21.0",
+  "legacy_backend_version": "0.20.6",
+  "minimum_firmware_version": "0.19.0",
+  "validated_firmware_release": {
+    "version": "0.19.0",
+    "manifest_sha256": "b9b12d87346148d5260a53d6303eb8c44ffb3cd24d6eb5c1a0017baccdc3a9d3",
+    "factory_sha256": "7f0ffaeaecb861ceb342ad571501b14c6017161bbb6d90f489002ae4271f6b14",
+    "ota_sha256": "68ab4263b407244d5cce05d7a81888604bd90dccfb38e93c8a63f4a55a070ad8",
+    "elf_sha256": "d1f77ac2f71a6491bd750f44efa5e6bacdd977edc945b6ef20d241995e843775",
+    "sha256sums_sha256": "fb4f71aebb6556ca6b6f659832943c698400f62cb9ee44bc1a10b2f5894050ce"
+  },
+  "transport_security": "unauthenticated_plaintext_trusted_lan_only",
+  "audio": {
+    "sample_rate_hz": 24000,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "encoding": "pcm_s16le"
+  },
+  "max_control_message_bytes": 2048,
+  "max_protocol_id": 2147483647,
+  "follow_up_sequence": [
+    "request_follow_up",
+    "request_follow_up_ack",
+    "follow_up_ready",
+    "final_media_check",
+    "commit_follow_up",
+    "commit_follow_up_ack",
+    "microphone_open"
+  ],
+  "backend_to_device": [
+    "hello",
+    "request_follow_up",
+    "cancel_request_follow_up",
+    "commit_follow_up",
+    "ack",
+    "phase",
+    "prepare_suppress_followup",
+    "commit_suppress_followup",
+    "cancel_suppress_followup"
+  ],
+  "device_to_backend": [
+    "hello_ack",
+    "request_follow_up_ack",
+    "follow_up_ready",
+    "commit_follow_up_ack",
+    "cancel_request_follow_up_ack",
+    "suppress_followup_ack",
+    "wake",
+    "flush",
+    "button_cancel",
+    "false_flag",
+    "interrupt",
+    "client_revoke"
+  ],
+  "trusted_backend_to_device_fields": {
+    "hello": ["type", "nonce", "audio_out", "follow_up_ms", "follow_up_open_delay_ms", "wake_open_delay_ms", "playback_prebuffer_ms"],
+    "request_follow_up": ["type", "token", "session_nonce"],
+    "cancel_request_follow_up": ["type", "token", "session_nonce"],
+    "commit_follow_up": ["type", "token", "session_nonce", "ready_nonce"],
+    "ack": ["type", "session_nonce", "wake_generation"],
+    "phase": ["type", "value", "session_nonce", "wake_generation"],
+    "prepare_suppress_followup": ["type", "token"],
+    "commit_suppress_followup": ["type", "token"],
+    "cancel_suppress_followup": ["type", "token"]
+  },
+  "legacy_backend_to_device_fields": {
+    "hello": ["type", "audio_out", "follow_up_ms", "follow_up_open_delay_ms", "wake_open_delay_ms", "playback_prebuffer_ms"],
+    "ack": ["type"],
+    "phase": ["type", "value"],
+    "prepare_suppress_followup": ["type", "token"],
+    "commit_suppress_followup": ["type", "token"],
+    "cancel_suppress_followup": ["type", "token"]
+  },
+  "trusted_device_to_backend_fields": {
+    "hello_ack": ["type", "nonce", "accepted", "audio_out", "follow_up_ms", "follow_up_open_delay_ms", "wake_open_delay_ms", "playback_prebuffer_ms"],
+    "request_follow_up_ack": ["type", "token", "session_nonce", "accepted"],
+    "follow_up_ready": ["type", "token", "session_nonce", "ready_nonce"],
+    "commit_follow_up_ack": ["type", "token", "session_nonce", "ready_nonce", "accepted"],
+    "cancel_request_follow_up_ack": ["type", "token", "session_nonce", "accepted", "cleared"],
+    "suppress_followup_ack": ["type", "stage", "token", "session_nonce", "wake_generation", "accepted"],
+    "wake": ["type", "session_nonce", "wake_generation"],
+    "flush": ["type", "session_nonce", "wake_generation"],
+    "button_cancel": ["type", "session_nonce", "wake_generation"],
+    "false_flag": ["type", "session_nonce", "wake_generation"],
+    "interrupt": ["type", "session_nonce", "wake_generation", "reason"],
+    "client_revoke": ["type", "session_nonce", "wake_generation", "reason"]
+  },
+  "legacy_device_to_backend_fields": {
+    "suppress_followup_ack": ["type", "stage", "token", "accepted"],
+    "wake": ["type"],
+    "flush": ["type"],
+    "button_cancel": ["type"],
+    "false_flag": ["type"],
+    "interrupt": ["type"]
+  },
+  "timing_ms": {
+    "request_follow_up_ready_timeout": 8000,
+    "request_follow_up_commit_timeout": 5000,
+    "mic_send_barrier_timeout": 50,
+    "follow_up_open_delay_max": 5000,
+    "speaker_stop_timeout": 3000,
+    "follow_up_chime_wait_timeout": 2000,
+    "playback_prebuffer_max": 2000,
+    "audio_ring_bytes": 2097152,
+    "backend_ready_timeout": 59000,
+    "backend_commit_ack_timeout": 6000
+  },
+  "limits": {
+    "protocol_history": 256,
+    "transport_uncertain_sockets": 16,
+    "handler_uncertain_sockets": 4,
+    "follow_up_tasks": 32,
+    "follow_up_cancellations": 8,
+    "wedge_tasks": 32
+  }
+}

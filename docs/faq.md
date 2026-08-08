@@ -57,18 +57,18 @@ do it for latency, not money); each web search adds a few cents.
   wake fires.
 - **After a wake**, mic audio goes to OpenAI's Realtime API for the conversation
   (that's the product), and web-search queries go to OpenAI when used.
-- **Everything else stays home**: enrollment recordings
-  (`/share/voice-enrollment/`), wake captures (`/share/voice-probes/`), voice
-  prints (`/share/voice-prints/`), and memory notes (`/share/voice-memory/`)
-  live on your HA box and are never uploaded by this add-on. Speaker
-  identification runs locally in the add-on. During voice enrollment, OpenAI
-  hears nothing at all — mic audio flows only to the local recorder.
+- **Everything else stays home**: wake captures (`/share/voice-probes/`),
+  pre-provisioned voice prints (`/share/voice-prints/`), opt-in debug recordings,
+  and memory notes (`/share/voice-memory/`) live on your HA box and are never
+  uploaded by this add-on. Speaker identification runs locally in the add-on.
+- **Backend microphone enrollment is absent in 0.21.** No model, device, or
+  administrator control can start an enrollment recording in the rapid pilot.
 
 ### What are the secrets in the firmware config?
 
 Neither is a cloud credential — both are device-local, and you generate your own:
 
-- **`api_key`** is an **ESPHome Noise/API encryption key** — it encrypts the
+- **`api_encryption_key`** is an **ESPHome Noise/API encryption key** — it encrypts the
   device↔Home Assistant connection. NOT a Home Assistant token, NOT your OpenAI
   key. 32 random bytes, base64: `openssl rand -base64 32` (or let ESPHome
   Builder generate it).
@@ -88,25 +88,22 @@ Home Assistant — no reflash. Or [train your own](features.md#wake-words).
 The Realtime model is multilingual. Set `transcription_language` to your ISO code
 and write your `instructions` in your language, keeping the LANGUAGE / STYLE /
 BEHAVIOR structure of the default prompt. The configuration UI even ships a full
-Dutch translation. The shipped instructions are English-tuned, and the enrollment
-coach prompts are English (PRs welcome).
+Dutch translation. The shipped instructions are English-tuned.
 
 ### Do I need the agent integration?
 
-No. Everything except instant deep recall and long-running task delegation works
-standalone: conversation, smart-home control, web search, timers, memory notes,
-speaker recognition, enrollment, sensors. When you want those superpowers,
+No. Conversation, explicitly allow-listed smart-home control, web search, timers,
+speaker recognition, sensors, and opt-in persistent memory work without an agent.
+When you want those superpowers,
 [OpenClaw](https://openclaw.ai) is what this project is built around and pairs
 with best — but the contract is agent-agnostic:
 [one URL and two POST shapes](agent-integration.md).
 
-### I trained my voice but it doesn't recognize me / never says my name
+### An existing voice print is not recognized / it never says my name
 
 Three things must line up — check `sensor.voicepe_<instance>_voice_prints`:
 
-1. The print exists (the enrollment coach says *"your voice print is ready"*
-   when it built — since 0.16.5 this is automatic; older versions needed a
-   manual build command).
+1. The administrator-provisioned print exists under `/share/voice-prints/`.
 2. The **same name** is in `speaker_male_name` / `speaker_female_name` in the
    add-on configuration (the sensor's `active` attribute shows this) — then
    restart the add-on.
@@ -117,31 +114,35 @@ Three things must line up — check `sensor.voicepe_<instance>_voice_prints`:
 Also: the check needs ~3 seconds of voiced speech, so ask "who am I?" as a
 follow-up rather than the very first words after the wake.
 
+The 0.21 rapid pilot consumes existing prints but does not capture or build new
+ones. Provisioning is an offline administrator task outside this release.
+
 ### I exposed a new entity or script to Assist but the assistant can't use it
 
-The tool list is fetched from Home Assistant **when a session is created** —
+The tool list is fetched from Home Assistant **when a session is created**, then
+intersected with the exact `mcp_tool_allowlist`. Empty means no MCP tools. A tool
+also has to remain in that session's exposed schema when dispatch occurs. Therefore
 newly exposed scripts (which arrive as new *tools*) aren't picked up by
 already-running sessions. **Restart the add-on** after exposing new scripts
-and they'll appear. (State of newly exposed *entities* is read live via
+and add their exact tool names to the allow-list before they'll appear. (State of newly exposed *entities* is read live via
 GetLiveContext, so those usually work without a restart — it's script tools
 that need one.)
 
 ### It replied to the TV / a conversation it overheard — how do I stop that?
 
-The mic stays open briefly after each reply (the follow-up window, so you can
-answer back without re-waking it). Background speech caught in that window can
-be transcribed and answered — and each answer reopens the window, which is how
-one stray fragment becomes a rambling exchange. Two levers:
+New installs use `follow_up_listen_seconds: 0`: ordinary replies close the mic,
+and only one necessary model-requested follow-up can open without another wake
+word during that physical wake. If an older install has a saved value above 0,
+the 0.21.0 add-on blocks startup until you set it to 0.
 
-1. **Instructions** (the big one): tell it silence is allowed. Add something
-   like: *"You will often overhear speech not addressed to you (TV, people
-   talking to each other, fragments). When that happens, produce no spoken
-   output at all — remain silent. Only respond when you are reasonably sure
-   you were addressed."* Silent responses also break the reply→window→reply
-   cascade.
-2. **Shorten the window**: lower `follow_up_listen_seconds` (less open-mic
-   exposure, at the cost of tighter follow-up timing), and keep
-   `vad_eagerness: low` so fragments are less likely to commit as turns.
+Version 0.21.0 requires `nearby_media_players` to contain the exact Living Room TV
+and Living Room Chromecast `media_player` entity IDs for this deployment. The
+backend checks only that fixed list
+before preparing and again after firmware READY while the mic is still closed.
+Playing, buffering, on,
+paused, unavailable, unknown, denied, malformed, or timed-out state keeps the
+mic closed. The question remains in conversation context, so say the wake word
+to answer it.
 
 ### Why does it say "still working on that"?
 

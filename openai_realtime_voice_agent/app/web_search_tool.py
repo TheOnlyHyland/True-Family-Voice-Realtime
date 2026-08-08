@@ -64,7 +64,7 @@ def create_web_search_tool_handler(
 
     async def web_search_tool_handler(params: "FunctionCallParams") -> None:
         query = (params.arguments or {}).get("query", "").strip()
-        logger.info(f"🔎 web_search called: {query!r} (model={model})")
+        logger.info(f"🔎 web_search called (model={model})")
 
         if not query:
             await params.result_callback("Geen zoekopdracht ontvangen.")
@@ -81,10 +81,13 @@ def create_web_search_tool_handler(
                 ),
             )
             answer = (getattr(response, "output_text", None) or "").strip()
-            logger.info(f"🔎 web_search answer: {answer[:200]}")
+            logger.info("🔎 web_search completed (%d characters)", len(answer))
             await params.result_callback(answer or "Ik kon hier online niets over vinden.")
-        except Exception as e:
-            logger.error(f"❌ web_search failed: {e}", exc_info=True)
+        except Exception as error:
+            logger.error(
+                "❌ web_search failed (%s)",
+                error.__class__.__name__,
+            )
             await params.result_callback("Het zoeken op internet lukte even niet.")
 
     return web_search_tool_handler

@@ -1,8 +1,9 @@
 name: True Family Voice Realtime
-version: "0.20.6"
+version: "0.21.0"
 slug: openai_realtime_voice_agent
 description: Talk to your home with OpenAI gpt-realtime-2.1 - a voice agent for the Home Assistant Voice PE, with live device control and web search.
 url: https://github.com/TheOnlyHyland/True-Family-Voice-Realtime
+image: ghcr.io/theonlyhyland/true-family-voice-realtime/openai-realtime-voice-agent-{arch}
 arch:
   - aarch64
   - amd64
@@ -13,9 +14,8 @@ host_network: true
 # Gives the add-on SUPERVISOR_TOKEN so it can reach Home Assistant (used as a
 # fallback auth token for the MCP server when longlived_token is left blank).
 homeassistant_api: true
-# /share access: voice-enrollment recordings are written to
-# /share/voice-enrollment/ so they persist across add-on rebuilds and can be
-# collected from the host. They contain PERSONAL voice data - handle with care.
+# /share access stores voice probes, administrator-provisioned voice prints,
+# and opt-in memory across add-on rebuilds. Voice data is personal data.
 map:
   - share:rw
 
@@ -26,17 +26,16 @@ map:
 #   → 🏠 Home Assistant → ⚙️ Advanced → 🔍 Debug
 # User-facing help lives in translations/, not here — keep comments dev-facing.
 #
-# REMOVED options (v0.4.29) — hardcoded to the only sane value; main.py keeps
-# env fallbacks so absent vars are fine:
-#   semantic_vad_create_response → true  (false breaks every multi-turn chat:
-#     pipecat 0.0.97 only auto-creates the FIRST response, the 2nd turn hangs)
+# REMOVED options (v0.4.29) — hardcoded to the only supported value:
+#   semantic_vad_create_response → false (0.21.0 owns response.create behind
+#     its bounded-context barrier)
 #   enable_disconnect_tool → false  (model could hang up mid-conversation)
 #   interrupt_response → false  (handsfree barge-in shelved: the speaker→mic
 #     echo leak made the VAD cut replies / squeal; firmware is barge_in:false)
 #   device_input_sample_rate → 16000  (the Voice PE firmware always sends 16k)
-# The server_vad escape hatch (turn_detection_type + vad_*) is KEPT but
-# optional-without-default → hidden behind the UI's "Show unused optional
-# configuration options" toggle on fresh installs. Same trick (v0.4.30) for
+# Legacy server_vad fields are retained only so saved configurations reach the
+# explicit 0.21.0 startup error. They are optional-without-default and hidden
+# behind "Show unused optional configuration options". The same trick (v0.4.30) for
 # the four *_custom escape-hatch fields: optional, no default, hidden until
 # needed (the dropdown descriptions tell users how to reveal them).
 # NB the add-on UI renders every string option as a SINGLE-LINE input — there
@@ -59,8 +58,12 @@ options:
     answer. Do not start every answer with "Okay"; vary your confirmation
     naturally, e.g. "The bedroom lamp is on now" or "Done, the light is off".
     BEHAVIOR: Carry out requested actions immediately with your tools and never
-    guess. If you are unsure which device, room, or action is meant, ask a short
-    clarifying question first. If something fails, briefly say what went wrong.
+    guess. The microphone closes after every ordinary reply. Ask no optional,
+    rhetorical, confirmation, "anything else?", or conversation-extending
+    questions. Only when a request cannot be completed safely or sensibly without
+    one answer, call request_follow_up as the sole tool immediately before asking
+    exactly one short, necessary question. When uncertain, do not call it and do
+    not ask a question. If something fails, briefly say what went wrong.
   transcription_language: ""
 
   # --- 🗣️ Model & voice ---
@@ -69,10 +72,10 @@ options:
   openai_model: "gpt-realtime-2.1"
   openai_voice: "marin"
   openai_speed: 1.0
-  max_output_tokens: 0
+  max_output_tokens: 1200
 
   # --- 💬 Conversation ---
-  follow_up_listen_seconds: 8
+  follow_up_listen_seconds: 0
   # 700 (not 0/200): a reply tail that survives the device AEC and arrives
   # ALONE in the open follow-up mic becomes a ghost turn — verified live
   # 2026-06-12 23:18 at 300 ms: the reply's own i2s/DAC tail (~600 ms) leaked
@@ -104,22 +107,24 @@ options:
   # names empty to disable. male_only_tools: comma-separated tool names that
   # only execute for the male voice (convenience gate, not biometric auth).
   speaker_male_name: ""
-  wake_sound_entity: ""
   # Voice timers: the device's exposed "Timer ringing" switch entity; empty =
   # timers unavailable (the assistant will say so).
   timer_ring_entity: ""
   # Sensor entity prefix: sensor.voicepe_<instance_name>_* (empty = "device")
   instance_name: ""
-  # Enrollment (fork): the wake phrase the audio coach asks for, and the TTS
-  # voice used for the coach prompts (any /v1/audio/speech voice).
-  enrollment_phrase: "hey leonard"
-  enrollment_tts_voice: "fable"
   speaker_female_name: ""
   male_only_tools: ""
 
   ha_mcp_url: ""
   longlived_token: ""
   mcp_tool_allowlist: ""
+  # Required comma-separated media_player entities near this Voice PE. Any
+  # active, unavailable, unknown, or unreadable entity keeps explicit follow-up
+  # closed; an empty list fails rapid-pilot startup.
+  nearby_media_players: ""
+  # Persistent voice-written memory reads and tools are privacy-sensitive and
+  # remain unavailable unless an administrator opts in explicitly.
+  enable_voice_memory: false
   # Direct OpenClaw/agent escalation endpoint: POST {"question"} -> {"answer"}.
   # When set, ask_openclaw is called directly (up to ~2.5 min) instead of via
   # HA's MCP server, whose hardcoded 60s timeout kills longer agent turns.
@@ -135,8 +140,9 @@ options:
   session_reuse_timeout_seconds: 300
   max_context_messages: 12
   transcription_model: "gpt-4o-transcribe"
-  # (turn_detection_type + vad_* deliberately have NO defaults here — see the
-  # header comment; semantic_vad is the hardwired default in main.py.)
+  # Legacy turn_detection_type + vad_* keys remain optional so an existing
+  # saved configuration reaches the app's explicit 0.21.0 startup error.
+  # Fresh installs keep them absent; semantic_vad is mandatory.
 
   # --- 🔍 Debug ---
   enable_recording: false
@@ -169,35 +175,33 @@ schema:
   # --- 🏠 Home Assistant ---
   # --- 🗣️ Speakers (fork) ---
   speaker_male_name: str
-  wake_sound_entity: str
   timer_ring_entity: str
   instance_name: str
-  enrollment_phrase: str
-  enrollment_tts_voice: str
   speaker_female_name: str
   male_only_tools: str
   ha_mcp_url: str
   longlived_token: password
   mcp_tool_allowlist: str
+  nearby_media_players: str
+  enable_voice_memory: bool
   openclaw_url: str
   announce_port: int(0,65535)
-  announce_token: str
+  announce_token: password
   # --- ⚙️ Advanced ---
   websocket_port: int(1024,65535)
   session_reuse_timeout_seconds: int(0,3600)
   max_context_messages: int(0,100)
   transcription_model: "list(gpt-4o-transcribe|gpt-realtime-whisper|gpt-4o-mini-transcribe|whisper-1|custom)"
   transcription_model_custom: str?
-  # Legacy server_vad escape hatch — optional, hidden until "Show unused
-  # optional configuration options" is toggled (or a value is saved).
+  # Legacy server_vad fields are retained only for saved-config diagnostics.
+  # Selecting server_vad is rejected by 0.21.0 startup validation.
   turn_detection_type: "list(semantic_vad|server_vad)?"
   vad_threshold: "float(0,1)?"
   vad_prefix_padding_ms: int?
   vad_silence_duration_ms: int?
   # --- 🔍 Debug ---
   enable_recording: bool
-# No `image:` key -> Home Assistant builds the add-on locally from the
-# Dockerfile in this directory (see build.yaml). This makes the fork work
-# without publishing images to a registry. Advanced users who prefer fast
-# installs can publish via the included GitHub Actions workflow and set:
-#   image: ghcr.io/<your-gh-user>/ha-openai-realtime/openai-realtime-voice-agent-{arch}
+# Release installs consume the versioned image built, smoked, and published by
+# the pinned GitHub Actions workflow. See RELEASE.md for the mandatory
+# pre-publication order and exact artifact checks. Local developers can remove
+# `image` only in an unpublished local add-on copy to build this Dockerfile.

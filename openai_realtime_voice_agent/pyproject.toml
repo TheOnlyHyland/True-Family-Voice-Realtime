@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "openai-realtime-voice-agent"
-version = "0.20.5"
+version = "0.21.0"
 description = "Home Assistant addon for OpenAI Realtime API voice control with WebSocket support using Pipecat"
 authors = ["Your Name <your.email@example.com>"]
 packages = [{include = "app", from = "."}]
@@ -9,11 +9,13 @@ packages = [{include = "app", from = "."}]
 python = ">=3.11,<3.14"
 # Pinned to the 0.0.x line: this codebase targets the Pipecat 0.0.x API
 # (FrameSerializerType, OpenAIRealtimeLLMService, SessionProperties events,
-# WebsocketServerParams). Without a lockfile pip otherwise resolves Pipecat
-# 1.x, whose changed API breaks the imports. 0.0.97 is the version this was
-# developed/tested against.
+# WebsocketServerParams). The lock, Docker build, and CI all assert 0.0.97;
+# Pipecat 1.x has incompatible imports and transport behavior.
 pipecat-ai = {extras = ["mcp", "openai", "websocket"], version = "0.0.97"}
 python-dotenv = ">=1.0.0"
+# NumPy 1.26 has no Python 3.13 wheel; 2.2.6 also satisfies Numba's <2.3 bound.
+numpy = "2.2.6"
+loguru = "0.7.3"
 # Voice-print speaker ID (fork): ONNX speaker-embedding runtime. Ships
 # manylinux aarch64/amd64 wheels; the model file itself is fetched in the
 # Dockerfile (small, pinned).
@@ -26,5 +28,5 @@ websockets = ">=13.0"
 start = "app.main:main"
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core==2.0.1"]
 build-backend = "poetry.core.masonry.api"

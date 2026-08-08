@@ -16,12 +16,13 @@ agent. Everything else works out of the box.
 > "What size shoes does Sam wear?"
 > "Where did we put the spare key?"
 
-Anything the household has taught it by voice — *"remember the wifi password
+With the explicit `enable_voice_memory` privacy opt-in, anything the household
+has taught it by voice — *"remember the wifi password
 is…"*, said once — is folded into its standing instructions, so the answer comes
 back instantly, with no lookup at all. Notes live in a plain markdown file on
 your box, and only identified household voices can add or remove them.
 
-*Built in — [Voice-instructed memory](features.md#voice-instructed-memory).*
+*Built in but disabled by default — [Voice-instructed memory](features.md#voice-instructed-memory).*
 
 > "When's Grandma's birthday?"
 > "What's the plumber's number?"
@@ -116,7 +117,7 @@ dismissed with "stop" or the button.
 
 *Built in — [Getting Started §1.3](getting-started.md#13-let-it-control-your-home-home-assistant-mcp),
 [Voice timers](features.md#voice-timers),
-[Speaker recognition](features.md#speaker-recognition--voice-enrollment).*
+[Speaker recognition](features.md#speaker-recognition).*
 
 ## Teaching it, one sentence at a time
 
@@ -124,9 +125,10 @@ dismissed with "stop" or the button.
 > "From now on, use Celsius."
 > "Remember that we park at the north lot."
 
-One sentence, permanent. Notes take effect from the next session, are attributed
+After an administrator enables `enable_voice_memory`, one sentence is permanent.
+Notes take effect from the next session, are attributed
 to whoever said them, and are listed back on request ("what do you remember?").
 Guests can't rewrite your house rules — memory writes are speaker-gated below
 the model.
 
-*Built in — [Voice-instructed memory](features.md#voice-instructed-memory).*
+*Built in but disabled by default — [Voice-instructed memory](features.md#voice-instructed-memory).*

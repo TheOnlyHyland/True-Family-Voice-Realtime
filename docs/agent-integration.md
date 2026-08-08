@@ -53,6 +53,10 @@ Set `openclaw_url` to an HTTP endpoint you control (a small "bridge" in front of
 your agent). The add-on POSTs JSON to that one URL; the body shape selects the
 operation:
 
+Treat the full URL as a secret when its path contains a hook token. The backend
+redacts the configured URL and path from its own and HTTP-client logs, but it
+must still be protected in backups, configuration exports, and bridge tooling.
+
 ### Escalation — `ask_openclaw`
 
 ```
@@ -138,7 +142,8 @@ Details:
 - Playback uses the device's **guarded TTS lane** (the same path timers use), so
   the assistant can't hear its own announcement and reply to it.
 - The add-on runs on the **host network** — the bearer token is the only lock.
-  Generate a long random one and treat it as a secret.
+  Generate a long random one and treat it as a secret. Home Assistant displays
+  `announce_token` as a masked password field.
 - One endpoint per add-on instance (per room). A multi-room setup gives your
   agent one announce URL per room; the `room` field on escalations tells it
   which one to use.

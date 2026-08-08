@@ -5,7 +5,14 @@ A complete, from-zero walkthrough. You'll set up two halves:
 1. the **backend add-on** (the voice "brain" that runs the OpenAI Realtime session), and
 2. the **device firmware** (turns the Voice PE into a thin client that listens and speaks).
 
-Plan ~30–45 minutes the first time. After that, updates are one click.
+Plan ~30–45 minutes the first time. Later firmware updates require deliberately
+advancing the two pinned release references after reviewing the new release.
+
+> **Mandatory 0.21 order:** firmware 0.19.0 or newer must be installed and
+> verified before backend 0.21.0 is started. During an upgrade, leave the old
+> backend running while firmware updates, then update the backend. During a
+> rollback, roll back the backend first and firmware second. Do not reverse
+> either order.
 
 ```
 Home Assistant Voice PE          Home Assistant (your box)             Cloud
@@ -35,7 +42,7 @@ Home Assistant Voice PE          Home Assistant (your box)             Cloud
 2. Top-right **⋮ → Repositories** → paste and add:
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
 3. Find **True Family Voice Realtime** in the store and click **Install**.
-   Home Assistant builds it locally — this takes a few minutes the first time.
+   Home Assistant pulls the immutable CI-verified image for this add-on version.
 
 > **One add-on instance serves one device.** For a second Voice PE, see
 > [Part 6 — Multiple devices](#part-6--multiple-devices).
@@ -66,6 +73,10 @@ that's what lets the voice turn your lights, switches, scenes and climate on and
    **blank**. The add-on then uses Home Assistant's built-in MCP endpoint with its own
    token. (Only fill `longlived_token` if the startup log shows a 401/403 on
    `/core/api/mcp`.)
+4. Populate **`mcp_tool_allowlist`** with the complete exact, case-sensitive list
+   of MCP tools this deployment needs. Empty now means **no MCP tools**, not all.
+   Preserve every desired whole-home tool and exposed custom script; do not trim
+   the list merely to match an example.
 
 You get a small fixed set of Assist tools (`HassTurnOn`, `HassTurnOff`, `HassLightSet`,
 `GetLiveContext`, `GetDateTime`, …). **`GetLiveContext`** is the "what's the current
@@ -73,29 +84,31 @@ state?" tool — keep it; it's what answers *"is the light on?"*.
 
 ### 1.4 Minimal configuration
 
-**The defaults are the recommended settings.** For a first run you only need:
+Before the first 0.21.0 run, configure all required authority and media fences:
 
 | Option | Value |
 |---|---|
 | `openai_api_key` | your key |
 | `transcription_language` | your ISO code (e.g. `en`, `nl`) — optional but recommended |
+| `mcp_tool_allowlist` | the complete exact list of desired MCP and custom-script tools; empty exposes none |
+| `nearby_media_players` | the exact `media_player` IDs for the Living Room TV and Living Room Chromecast |
 
 Everything else can wait. The full reference — every option, its default, and when
 to change it — is in the [Configuration Reference](configuration.md).
 
-### 1.5 Start it
+### 1.5 Leave 0.21.0 stopped until firmware is ready
 
-Click **Start**, then open the **Log** tab. A healthy start shows
-`✅ Fetched N MCP tools` and `Creating session with N tools` (with `Hass*` names).
-The add-on now listens on port **8080**.
+Save the configuration, but do **not** start backend 0.21.0 yet. Complete the
+firmware update below first. This is a protocol compatibility requirement, not
+an optional troubleshooting preference.
 
 ---
 
 ## Part 2 — The device firmware
 
 This replaces the stock Home Assistant voice pipeline on the Voice PE with a thin
-client that streams audio to the add-on. You set it up **once** via a tiny "stub"
-config; after that, firmware updates are one click (no copy-pasting).
+client that streams audio to the add-on. You set it up via a tiny pinned "stub"
+config. The pin does not auto-discover later releases.
 
 The firmware lives in its own repo:
 **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**.
@@ -128,7 +141,7 @@ In ESPHome Builder → **Secrets** (top-right ⋮), add:
 wifi_ssid: "Your-WiFi"
 wifi_password: "your-wifi-password"
 ota_password: "the-OTA-password-from-step-2.2"
-api_key: "the-API-encryption-key-from-step-2.2"   # 44-char base64
+api_encryption_key: "the-API-encryption-key-from-step-2.2" # 44-char base64
 
 # Optional — ONLY if you want a fixed IP (otherwise the device uses DHCP):
 # static_ip: "192.168.1.50"
@@ -140,7 +153,7 @@ api_key: "the-API-encryption-key-from-step-2.2"   # 44-char base64
 
 Two of these confuse people, so to be clear:
 
-- **`api_key`** is an **ESPHome Noise/API encryption key** — NOT a Home Assistant
+- **`api_encryption_key`** is an **ESPHome Noise/API encryption key** — NOT a Home Assistant
   token, NOT your OpenAI key. It's 32 random bytes, base64-encoded. If you flash a
   factory-fresh device (no key from step 2.2), generate your own:
   `openssl rand -base64 32`.
@@ -154,8 +167,8 @@ Two of these confuse people, so to be clear:
 
 1. In ESPHome Builder, **Edit** the adopted device and **replace its entire YAML** with
    a ready-made stub from the firmware repo:
-   - DHCP: [`esphome-builder.dhcp.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/main/esphome-builder.dhcp.yaml)
-   - Fixed IP: [`esphome-builder.static-ip.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/main/esphome-builder.static-ip.yaml)
+   - DHCP: [`esphome-builder.dhcp.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.dhcp.yaml)
+   - Fixed IP: [`esphome-builder.static-ip.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.static-ip.yaml)
 
    Set `name` and `friendly_name`, and **keep** the `packages:` / `dashboard_import:`
    lines — those are what pull the full firmware from the repo. Keep the device
@@ -165,12 +178,23 @@ Two of these confuse people, so to be clear:
    > `va_url:` line under `substitutions:` with your HA host, e.g.
    > `va_url: "ws://192.168.1.x:8080/"`.
 
+   The two `0.19.0` references are immutable and do not discover future releases.
+   For an approved update, advance both references to the exact newer tag or
+   deliberately use that release's pinned stub.
+
 2. Click **Install →**
    - **First time:** choose **Plug into this computer** — the first flash from stock
      firmware needs the device connected by **USB** to the machine running your browser.
    - **After that:** **Wirelessly (OTA)** — every later flash goes over Wi-Fi.
 
-That's it — the device boots, connects to the add-on, and you're ready to talk to it.
+The device now boots with compatible firmware and waits for the backend.
+
+### 2.5 Start the backend
+
+Only after the firmware update succeeds, click **Start** on the add-on and open
+the **Log** tab. A healthy start shows `✅ Fetched N MCP tools` and
+`Creating session with N tools` (with `Hass*` names). The add-on listens on port
+**8080**, and the device can now connect.
 
 ---
 
@@ -183,27 +207,32 @@ That's it — the device boots, connects to the add-on, and you're ready to talk
    → a wake chime plays and the ring shows **listening**.
 3. Ask for something you exposed, e.g. *"turn on the bedroom lamp"* → the ring shows
    **thinking** → it acts and replies.
-4. Keep talking — the mic stays open for a few seconds after each reply, so follow-ups
-   need no wake word.
+4. Ordinary replies close the mic. If the assistant must ask one necessary
+   question, it can open one no-wake follow-up window for that physical wake;
+otherwise say the wake word again. Missing, active, or uncertain nearby media
+scope keeps even
+   that one window closed, while the conversation remains ready after re-waking.
 5. To interrupt a reply: say **"stop"** or press the **center button**.
 
 **If something's off, check the logs:**
 
-- Add-on **Log** tab: `🤖 assistant:` lines, tool calls, and
-  `🔌 reconnecting` / `✅ reconnected`.
+- Add-on **Log** tab: bounded assistant-completion metadata, phase/tool names,
+  and `🔌 reconnecting` / `✅ reconnected`. Conversation text and tool arguments
+  are not logged.
 - Device logs: ESPHome Builder → your device → **Logs**.
 - Tools missing? Re-check Part 1.3. A 401/403 in the log means set `longlived_token`
   (HA profile → Security).
 
 ---
 
-## Part 4 — Updating later (one click)
+## Part 4 — Updating later
 
-- **Firmware:** when a new version is released, ESPHome Builder shows **"Update
-  available"** for your device. Click it → it recompiles with the latest config + code
-  and flashes over Wi-Fi. No copy-pasting, ever again.
+- **Firmware:** review the new firmware release, update both immutable refs in
+  your device stub to that exact tag, then compile and flash it over Wi-Fi. The
+  pinned `0.19.0` stub deliberately does not advertise moving releases.
 - **Add-on:** Home Assistant shows an **Update** badge on the add-on (with a changelog).
-  Click **Update** — it rebuilds and restarts.
+  Update firmware first when the release notes require a coordinated protocol
+  version, verify it, then update the add-on image.
 
 Your device-specific settings (name, Wi-Fi, IP) live in your stub + `secrets.yaml` and
 are **never** overwritten by an update.
@@ -217,14 +246,18 @@ Once the basics work, the fun starts. Each of these has a full guide in
 
 - **Persona** — rewrite `instructions` to change personality, language, house rules.
   See [Persona & voices](features.md#persona--voices).
-- **Speaker recognition** — set speaker names, then say *"train my voice"* for guided
-  enrollment. See [Speaker recognition](features.md#speaker-recognition--voice-enrollment).
-- **Memory** — *"remember that the bins go out Thursday"*. See
+- **Speaker recognition** — set speaker names for the local voice-type heuristic;
+  pre-provisioned voice prints are also consumed when present. Backend enrollment
+  is not part of the 0.21 rapid pilot. See
+  [Speaker recognition](features.md#speaker-recognition).
+- **Memory** — first opt in with `enable_voice_memory: true`, then say *"remember
+  that the bins go out Thursday"*. See
   [Voice-instructed memory](features.md#voice-instructed-memory).
 - **Timers** — set `timer_ring_entity`. See [Voice timers](features.md#voice-timers).
 - **Sensors** — set `instance_name` to publish per-device HA sensors. See
   [HA sensors](features.md#ha-sensors).
-- **Your own wake word** — the [retrain flywheel](features.md#the-retrain-flywheel).
+- **Your own wake word** — use an external offline microWakeWord training workflow
+  with your own positive samples and locally flagged false wakes.
 - **An agent** — deep recall and background task delegation. See
   [Agent Integration](agent-integration.md).
 

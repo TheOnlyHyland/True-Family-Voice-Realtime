@@ -53,7 +53,7 @@ tested, explained**.
 Firmware lives in
 [True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware) —
 same rules, plus: firmware PRs **must** state which device revision you flashed
-and that wake word, timers, and enrollment still work.
+and that wake word, timers, Stop, and selective follow-up still work.
 
 ## Testing a backend change locally
 

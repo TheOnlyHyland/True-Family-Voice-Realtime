@@ -14,85 +14,409 @@ on:
       - master
     paths:
       - "openai_realtime_voice_agent/**"
+      - ".github/workflows/build-addon.yml"
   release:
-    types: [published]
+    types:
+      - published
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish immutable version and source tags before the GitHub release"
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: "Required when publish=true, for example v0.21.0"
+        required: false
+        type: string
+      source_commit:
+        description: "Exact 40-character candidate commit to publish"
+        required: false
+        type: string
+      pilot_firmware_source_only:
+        description: "Household pilot only: verify exact installed firmware source without public release assets"
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: addon-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: theonlyhyland/true-family-voice-realtime/openai-realtime-voice-agent
+  ADDON_VERSION: 0.21.0
+  FIRMWARE_VERSION: 0.19.0
+  FIRMWARE_SOURCE_COMMIT: bcb3bf4cbf181397b51aa7cc5bca5cfecefc7b3a
+  FIRMWARE_REPOSITORY: TheOnlyHyland/True-Family-Voice-Firmware
+  FIRMWARE_MANIFEST_SHA256: b9b12d87346148d5260a53d6303eb8c44ffb3cd24d6eb5c1a0017baccdc3a9d3
+  FIRMWARE_FACTORY_SHA256: 7f0ffaeaecb861ceb342ad571501b14c6017161bbb6d90f489002ae4271f6b14
+  FIRMWARE_OTA_SHA256: 68ab4263b407244d5cce05d7a81888604bd90dccfb38e93c8a63f4a55a070ad8
+  FIRMWARE_ELF_SHA256: d1f77ac2f71a6491bd750f44efa5e6bacdd977edc945b6ef20d241995e843775
+  FIRMWARE_SHA256SUMS_SHA256: fb4f71aebb6556ca6b6f659832943c698400f62cb9ee44bc1a10b2f5894050ce
+  POETRY_LOCK_SHA256: 13193c62fc95a0c05c7b6e89efe7db060b4f00438db46c83dc43a23eb1d9af15
+  TITANET_MODEL_SHA256: d51abcf31717ef28162f26acb9d44dd4127c3d44c9b8624f699f3425daca8e77
+  TITANET_MODEL_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_large.onnx
+  DEBIAN_SNAPSHOT: 20260801T000000Z
+  POETRY_VERSION: 2.0.1
+  POETRY_CORE_VERSION: 2.0.1
+  AARCH64_BASE_IMAGE: ghcr.io/home-assistant/aarch64-base-debian@sha256:4ecdb87bbf2e24c220140aedefdc521f7e3c499bc116c886f432261dc247d2f8
+  AMD64_BASE_IMAGE: ghcr.io/home-assistant/amd64-base-debian@sha256:84023298f975360b4350fe76118a1a5b117ff8f7ca5249d6398381659051aba3
 
 jobs:
-  build:
-    name: Build for ${{ matrix.arch }}
+  test:
+    name: Backend protocol and unit tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Checkout exact installed firmware source commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ env.FIRMWARE_REPOSITORY }}
+          ref: ${{ env.FIRMWARE_SOURCE_COMMIT }}
+          path: firmware-candidate
+          persist-credentials: false
+
+      - name: Download and verify immutable firmware package
+        if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.pilot_firmware_source_only) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_ROOT="$RUNNER_TEMP/true-family-voice-firmware-$FIRMWARE_VERSION"
+          RELEASE_URL="https://github.com/$FIRMWARE_REPOSITORY/releases/download/$FIRMWARE_VERSION"
+          mkdir -p "$PACKAGE_ROOT"
+          for FILE in \
+            manifest.json \
+            true-family-voice-esp32s3.factory.bin \
+            true-family-voice-esp32s3.ota.bin \
+            true-family-voice-esp32s3.elf \
+            SHA256SUMS; do
+            curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+              --output "$PACKAGE_ROOT/$FILE" "$RELEASE_URL/$FILE"
+          done
+          test "$(sha256sum "$PACKAGE_ROOT/manifest.json")" = \
+            "$FIRMWARE_MANIFEST_SHA256  $PACKAGE_ROOT/manifest.json"
+          test "$(sha256sum "$PACKAGE_ROOT/true-family-voice-esp32s3.factory.bin")" = \
+            "$FIRMWARE_FACTORY_SHA256  $PACKAGE_ROOT/true-family-voice-esp32s3.factory.bin"
+          test "$(sha256sum "$PACKAGE_ROOT/true-family-voice-esp32s3.ota.bin")" = \
+            "$FIRMWARE_OTA_SHA256  $PACKAGE_ROOT/true-family-voice-esp32s3.ota.bin"
+          test "$(sha256sum "$PACKAGE_ROOT/true-family-voice-esp32s3.elf")" = \
+            "$FIRMWARE_ELF_SHA256  $PACKAGE_ROOT/true-family-voice-esp32s3.elf"
+          test "$(sha256sum "$PACKAGE_ROOT/SHA256SUMS")" = \
+            "$FIRMWARE_SHA256SUMS_SHA256  $PACKAGE_ROOT/SHA256SUMS"
+          (cd "$PACKAGE_ROOT" && sha256sum --check SHA256SUMS)
+          test "$(git -C firmware-candidate rev-parse HEAD)" = \
+            "$FIRMWARE_SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < firmware-candidate/VERSION)" = \
+            "$FIRMWARE_VERSION"
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned Poetry toolchain
+        run: |
+          python -m pip install \
+            "poetry==$POETRY_VERSION" \
+            "poetry-core==$POETRY_CORE_VERSION"
+
+      - name: Install locked production dependencies
+        working-directory: openai_realtime_voice_agent
+        run: |
+          VENV="$RUNNER_TEMP/true-family-voice-production"
+          test "$(sha256sum poetry.lock)" = "$POETRY_LOCK_SHA256  poetry.lock"
+          poetry check --lock
+          python -m venv "$VENV"
+          VIRTUAL_ENV="$VENV" PATH="$VENV/bin:$PATH" poetry sync --only main --no-root --no-interaction --no-ansi
+          "$VENV/bin/python" -c 'from importlib.metadata import version; assert version("pipecat-ai") == "0.0.97"; assert version("numpy") == "2.2.6"; assert version("loguru") == "0.7.3"'
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+
+      - name: Run backend tests against final firmware
+        working-directory: openai_realtime_voice_agent
+        env:
+          TRUE_FAMILY_VOICE_FIRMWARE_ROOT: ${{ github.workspace }}/firmware-candidate
+          TRUE_FAMILY_VOICE_FIRMWARE_ARTIFACT_ROOT: ${{ runner.temp }}/true-family-voice-firmware-${{ env.FIRMWARE_VERSION }}
+          TRUE_FAMILY_VOICE_REQUIRE_FIRMWARE_VALIDATION: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.pilot_firmware_source_only)) && '1' || '0' }}
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile backend sources
+        working-directory: openai_realtime_voice_agent
+        run: python -m compileall -q app tests
+
+      - name: Validate shell entry points
+        working-directory: openai_realtime_voice_agent
+        run: |
+          bash -n root/run.sh tests/production_rootfs_smoke.sh
+          shellcheck --shell=bash root/run.sh tests/production_rootfs_smoke.sh
+
+  build-smoke:
+    name: Build and smoke ${{ matrix.arch }} image
+    if: github.event_name != 'release'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - aarch64
-          - amd64
+        include:
+          - arch: aarch64
+            platform: linux/arm64
+            docker_arch: arm64
+            base_image: ghcr.io/home-assistant/aarch64-base-debian@sha256:4ecdb87bbf2e24c220140aedefdc521f7e3c499bc116c886f432261dc247d2f8
+          - arch: amd64
+            platform: linux/amd64
+            docker_arch: amd64
+            base_image: ghcr.io/home-assistant/amd64-base-debian@sha256:84023298f975360b4350fe76118a1a5b117ff8f7ca5249d6398381659051aba3
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - name: Extract version from config.yaml
-        id: version
+      - name: Verify source and requested version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PUBLISH: ${{ inputs.publish }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          PILOT_FIRMWARE_SOURCE_ONLY: ${{ inputs.pilot_firmware_source_only }}
         run: |
-          VERSION=$(grep '^version:' openai_realtime_voice_agent/config.yaml | sed 's/version: "\(.*\)"/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Extracted version: $VERSION"
+          VERSION=$(python -c 'import pathlib, re; text = pathlib.Path("openai_realtime_voice_agent/config.yaml").read_text(); print(re.search(r"^version: \"([^\"]+)\"$", text, re.MULTILINE).group(1))')
+          test "$VERSION" = "$ADDON_VERSION"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$PUBLISH" == "true" ]]; then
+            [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+            test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+            test "$RELEASE_TAG" = "v$VERSION"
+            if [[ "$PILOT_FIRMWARE_SOURCE_ONLY" == "true" ]]; then
+              test "$FIRMWARE_SOURCE_COMMIT" = "bcb3bf4cbf181397b51aa7cc5bca5cfecefc7b3a"
+            fi
+          fi
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
         with:
-          platforms: linux/arm64,linux/amd64
+          platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Build exact production image once
+        id: build
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: ./openai_realtime_voice_agent
+          file: ./openai_realtime_voice_agent/Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: true-family-voice-realtime:${{ matrix.arch }}-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_FROM=${{ matrix.base_image }}
+            BUILD_VERSION=${{ env.ADDON_VERSION }}
+            BUILD_REVISION=${{ github.sha }}
+            DEBIAN_SNAPSHOT=${{ env.DEBIAN_SNAPSHOT }}
+            POETRY_VERSION=${{ env.POETRY_VERSION }}
+            POETRY_CORE_VERSION=${{ env.POETRY_CORE_VERSION }}
+            POETRY_LOCK_SHA256=${{ env.POETRY_LOCK_SHA256 }}
+            TITANET_MODEL_URL=${{ env.TITANET_MODEL_URL }}
+            TITANET_MODEL_SHA256=${{ env.TITANET_MODEL_SHA256 }}
+
+      - name: Smoke the content-addressed image
+        env:
+          EXPECTED_IMAGE_ID: ${{ steps.build.outputs.imageid }}
+          IMAGE_REF: true-family-voice-realtime:${{ matrix.arch }}-${{ github.sha }}
+          EXPECTED_ARCH: ${{ matrix.docker_arch }}
+        run: |
+          set -euo pipefail
+          IMAGE_ID=$(docker image inspect "$IMAGE_REF" --format '{{.Id}}')
+          test "$IMAGE_ID" = "$EXPECTED_IMAGE_ID"
+          test "$(docker image inspect "$IMAGE_ID" --format '{{.Architecture}}')" = "$EXPECTED_ARCH"
+          test "$(docker image inspect "$IMAGE_ID" --format '{{json .Config.Cmd}}')" = '["/run.sh"]'
+          test "$(docker image inspect "$IMAGE_ID" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$ADDON_VERSION"
+          test "$(docker image inspect "$IMAGE_ID" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$IMAGE_ID" --format '{{ index .Config.Labels "io.true-family.voice.debian-snapshot" }}')" = "$DEBIAN_SNAPSHOT"
+          test "$(docker image inspect "$IMAGE_ID" --format '{{ index .Config.Labels "io.true-family.voice.poetry-version" }}')" = "$POETRY_VERSION"
+          test "$(docker image inspect "$IMAGE_ID" --format '{{ index .Config.Labels "io.true-family.voice.poetry-core-version" }}')" = "$POETRY_CORE_VERSION"
+          test "$(docker image inspect "$IMAGE_ID" --format '{{ index .Config.Labels "io.true-family.voice.poetry-lock-sha256" }}')" = "$POETRY_LOCK_SHA256"
+          test "$(docker image inspect "$IMAGE_ID" --format '{{ index .Config.Labels "io.true-family.voice.titanet-source" }}')" = "$TITANET_MODEL_URL"
+          test "$(docker image inspect "$IMAGE_ID" --format '{{ index .Config.Labels "io.true-family.voice.titanet-sha256" }}')" = "$TITANET_MODEL_SHA256"
+          test "$(docker run --rm --entrypoint sha256sum "$IMAGE_ID" /usr/share/true-family-voice/poetry.lock)" = "$POETRY_LOCK_SHA256  /usr/share/true-family-voice/poetry.lock"
+          test "$(docker run --rm --entrypoint sha256sum "$IMAGE_ID" /opt/voiceprint/embedder.onnx)" = "$TITANET_MODEL_SHA256  /opt/voiceprint/embedder.onnx"
+          docker run --rm --entrypoint /bin/bash "$IMAGE_ID" -c 'test "$PYTHONSAFEPATH" = "1"; test ! -e /app; python3 -P -c '\''import importlib.util; spec = importlib.util.find_spec("app.main"); assert spec is not None and "/site-packages/app/main.py" in spec.origin'\'''
+          docker run --rm --entrypoint python3 "$IMAGE_ID" -P -c 'from importlib.metadata import version; assert version("pipecat-ai") == "0.0.97"; assert version("numpy") == "2.2.6"; assert version("loguru") == "0.7.3"'
+          docker run --rm -e TRUE_FAMILY_VOICE_STARTUP_SMOKE=1 "$IMAGE_ID"
+
+      - name: Seal the exact smoked image artifact
+        env:
+          EXPECTED_IMAGE_ID: ${{ steps.build.outputs.imageid }}
+          IMAGE_REF: true-family-voice-realtime:${{ matrix.arch }}-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_ROOT="$RUNNER_TEMP/true-family-voice-image-${{ matrix.arch }}"
+          ARCHIVE="$ARTIFACT_ROOT/image-${{ matrix.arch }}.tar"
+          METADATA="$ARTIFACT_ROOT/image-${{ matrix.arch }}.json"
+          mkdir -p "$ARTIFACT_ROOT"
+          test "$(docker image inspect "$IMAGE_REF" --format '{{.Id}}')" = "$EXPECTED_IMAGE_ID"
+          docker image save --output "$ARCHIVE" "$IMAGE_REF"
+          ARCHIVE_SHA256=$(sha256sum "$ARCHIVE" | cut -d ' ' -f 1)
+          jq -n \
+            --arg arch "${{ matrix.arch }}" \
+            --arg docker_arch "${{ matrix.docker_arch }}" \
+            --arg image_ref "$IMAGE_REF" \
+            --arg image_id "$EXPECTED_IMAGE_ID" \
+            --arg archive_sha256 "$ARCHIVE_SHA256" \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg version "$ADDON_VERSION" \
+            '{arch: $arch, docker_arch: $docker_arch, image_ref: $image_ref, image_id: $image_id, archive_sha256: $archive_sha256, source_sha: $source_sha, version: $version}' \
+            > "$METADATA"
+
+      - name: Upload exact smoked image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: true-family-voice-image-${{ matrix.arch }}
+          path: ${{ runner.temp }}/true-family-voice-image-${{ matrix.arch }}/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish exact smoked architecture images
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs:
+      - test
+      - build-smoke
+    runs-on: ubuntu-latest
+    environment: backend-production
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Validate protected publication request
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          PILOT_FIRMWARE_SOURCE_ONLY: ${{ inputs.pilot_firmware_source_only }}
+        run: |
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          test "$RELEASE_TAG" = "v$ADDON_VERSION"
+          if [[ "$PILOT_FIRMWARE_SOURCE_ONLY" == "true" ]]; then
+            test "$FIRMWARE_SOURCE_COMMIT" = "bcb3bf4cbf181397b51aa7cc5bca5cfecefc7b3a"
+          fi
+
+      - name: Download exact smoked image artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: true-family-voice-image-*
+          path: ${{ runner.temp }}/built-images
+          merge-multiple: true
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Map architecture
-        id: arch-map
+      - name: Load and verify exact smoked images
         run: |
-          case "${{ matrix.arch }}" in
-            aarch64)
-              echo "platform=linux/arm64" >> $GITHUB_OUTPUT
-              ;;
-            amd64)
-              echo "platform=linux/amd64" >> $GITHUB_OUTPUT
-              ;;
-          esac
+          set -euo pipefail
+          ARTIFACT_ROOT="$RUNNER_TEMP/built-images"
+          for ARCH in aarch64 amd64; do
+            ARCHIVE="$ARTIFACT_ROOT/image-$ARCH.tar"
+            METADATA="$ARTIFACT_ROOT/image-$ARCH.json"
+            test -s "$ARCHIVE"
+            test -s "$METADATA"
+            test "$(jq -er '.arch' "$METADATA")" = "$ARCH"
+            test "$(jq -er '.source_sha' "$METADATA")" = "$GITHUB_SHA"
+            test "$(jq -er '.version' "$METADATA")" = "$ADDON_VERSION"
+            test "$(sha256sum "$ARCHIVE" | cut -d ' ' -f 1)" = \
+              "$(jq -er '.archive_sha256' "$METADATA")"
+            docker image load --input "$ARCHIVE"
+            IMAGE_REF=$(jq -er '.image_ref' "$METADATA")
+            IMAGE_ID=$(jq -er '.image_id' "$METADATA")
+            test "$(docker image inspect "$IMAGE_REF" --format '{{.Id}}')" = "$IMAGE_ID"
+            test "$(docker image inspect "$IMAGE_ID" --format '{{.Architecture}}')" = \
+              "$(jq -er '.docker_arch' "$METADATA")"
+            test "$(docker image inspect "$IMAGE_ID" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          done
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+      - name: Refuse immutable version or source-tag overwrite
+        run: |
+          set -euo pipefail
+          for ARCH in aarch64 amd64; do
+            IMAGE="$REGISTRY/$IMAGE_NAME-$ARCH"
+            for TAG in "$ADDON_VERSION" "sha-$GITHUB_SHA"; do
+              if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+                echo "Refusing to overwrite existing immutable tag $IMAGE:$TAG" >&2
+                exit 1
+              fi
+            done
+          done
+
+      - name: Publish the unchanged gated images
+        run: |
+          set -euo pipefail
+          ARTIFACT_ROOT="$RUNNER_TEMP/built-images"
+          for ARCH in aarch64 amd64; do
+            METADATA="$ARTIFACT_ROOT/image-$ARCH.json"
+            IMAGE_ID=$(jq -er '.image_id' "$METADATA")
+            IMAGE="$REGISTRY/$IMAGE_NAME-$ARCH"
+            VERSION_REF="$IMAGE:$ADDON_VERSION"
+            SOURCE_REF="$IMAGE:sha-$GITHUB_SHA"
+            docker tag "$IMAGE_ID" "$VERSION_REF"
+            docker tag "$IMAGE_ID" "$SOURCE_REF"
+            docker push "$VERSION_REF"
+            docker push "$SOURCE_REF"
+            VERSION_MANIFEST=$(docker manifest inspect "$VERSION_REF")
+            SOURCE_MANIFEST=$(docker manifest inspect "$SOURCE_REF")
+            test "$VERSION_MANIFEST" = "$SOURCE_MANIFEST"
+            VERSION_DIGEST=$(docker manifest inspect --verbose "$VERSION_REF" | jq -er '.Descriptor.digest')
+            SOURCE_DIGEST=$(docker manifest inspect --verbose "$SOURCE_REF" | jq -er '.Descriptor.digest')
+            test "$VERSION_DIGEST" = "$SOURCE_DIGEST"
+            echo "Published unchanged gated image: $VERSION_REF"
+            echo "Published source identity: $SOURCE_REF"
+            echo "Published digest: $VERSION_DIGEST"
+          done
+
+  release-verify:
+    name: Verify release uses pre-published immutable images
+    if: github.event_name == 'release'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
-          context: ./openai_realtime_voice_agent
-          file: ./openai_realtime_voice_agent/Dockerfile
-          platforms: ${{ steps.arch-map.outputs.platform }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}-${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image manifest
-        if: github.event_name != 'pull_request' && matrix.arch == 'amd64'
+      - name: Verify release artifact was published first
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          echo "Image built: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}"
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$ADDON_VERSION"
+          for ARCH in aarch64 amd64; do
+            IMAGE="$REGISTRY/$IMAGE_NAME-$ARCH"
+            VERSION_MANIFEST=$(docker manifest inspect "$IMAGE:$ADDON_VERSION")
+            SOURCE_MANIFEST=$(docker manifest inspect "$IMAGE:sha-$GITHUB_SHA")
+            test "$VERSION_MANIFEST" = "$SOURCE_MANIFEST"
+            VERSION_DIGEST=$(docker manifest inspect --verbose "$IMAGE:$ADDON_VERSION" | jq -er '.Descriptor.digest')
+            SOURCE_DIGEST=$(docker manifest inspect --verbose "$IMAGE:sha-$GITHUB_SHA" | jq -er '.Descriptor.digest')
+            test "$VERSION_DIGEST" = "$SOURCE_DIGEST"
+          done

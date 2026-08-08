@@ -5,13 +5,12 @@ and which options drive it. Option details live in the
 [Configuration Reference](configuration.md).
 
 - [Wake words](#wake-words)
-- [Speaker recognition & voice enrollment](#speaker-recognition--voice-enrollment)
+- [Speaker recognition](#speaker-recognition)
 - [Voice-instructed memory](#voice-instructed-memory)
 - [Instant recall & agent escalation](#instant-recall--agent-escalation)
 - [Long-running task delegation](#long-running-task-delegation)
 - [Voice timers](#voice-timers)
 - [False-wake flagging](#false-wake-flagging)
-- [The retrain flywheel](#the-retrain-flywheel)
 - [Calendar lookups](#calendar-lookups)
 - [Authoritative room-light ON](#authoritative-room-light-on)
 - [Web search](#web-search)
@@ -24,8 +23,7 @@ and which options drive it. Option details live in the
 ## Wake words
 
 **"Hey Leonard" ships as the default wake word** — a custom microWakeWord model
-trained by this project on real household voices (it's the worked example of the
-[retrain flywheel](#the-retrain-flywheel) below; the model lives in the firmware
+trained by this project on real household voices. The model lives in the firmware
 repo's [`models/`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/tree/main/models)
 directory).
 
@@ -45,11 +43,9 @@ Three ways to pick your wake word:
 3. **Train your own** — any phrase, tuned to your voices. The community
    [microWakeWord Trainer for Apple Silicon](https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon)
    is the tool this project's own model was trained with; training runs in ~2 hours
-   on an Apple Silicon or NVIDIA machine. Use your
-   [enrollment recordings](#speaker-recognition--voice-enrollment) as real positives
-   and your [flagged false wakes](#false-wake-flagging) as hard negatives, then set
-   `wake_word_model` to your model. See [the flywheel](#the-retrain-flywheel) for the
-   full loop.
+   on an Apple Silicon or NVIDIA machine. Supply your own positive samples and
+   use [flagged false wakes](#false-wake-flagging) as hard negatives, then set
+   `wake_word_model` to your model.
 
 **Sensitivity** is a runtime select in HA too ("Wake word sensitivity": Slightly /
 Moderately / Very sensitive). Custom models come with calibrated cutoffs — set them
@@ -57,7 +53,7 @@ via the `wake_cutoff_*` substitutions.
 
 ---
 
-## Speaker recognition & voice enrollment
+## Speaker recognition
 
 The assistant knows who's talking — locally, on your box. It greets people by name,
 attributes [memory notes](#voice-instructed-memory) and
@@ -73,62 +69,36 @@ injected into the session, so the assistant can use names or sir/ma'am. It canno
 tell two men apart, and same-voice-type guests match that name. Leave both names
 empty to disable.
 
-**Tier 2 — voice prints.** Per-person identification with a neural
+**Tier 2 — pre-provisioned voice prints.** Per-person identification with a neural
 speaker-embedding model: each wake's capture is embedded and compared against
-enrolled per-person centroids (stored in `/share/voice-prints/<name>.json`), with
+administrator-provisioned per-person centroids (stored in
+`/share/voice-prints/<name>.json`), with
 a ≥3 s duration guard and the pitch heuristic as fallback. Guests classify as
 *unknown* and get neutral handling.
 
-To enroll a voice print — two steps:
+Version 0.21.0 deliberately provides no backend enrollment path. No model tool,
+device control, configuration option, or administrator endpoint can start a
+microphone recording. Existing prints are consumed only when the same name is in
+the add-on configuration:
 
-1. **Say "train my voice"** (or "teach me my voice" — any similar phrasing). The
-   device enters a true enrollment mode: mic pinned open, wake/stop detection
-   disarmed, **cyan breathing LED**, a 10-minute hard cap, and the center button as
-   a physical escape. An automated audio coach walks you through **25 varied
-   repetitions** of the `enrollment_phrase` plus **90 seconds of natural speech**.
-   When the session completes, **the voice print builds automatically** and the
-   coach confirms out loud: *"Your voice print is ready."* (If there wasn't
-   enough clear speech, it says so and you just run the session again.)
-2. **Put the same name in the add-on configuration** — recognition is inactive
-   until the enrolled name appears here:
-
-   ```yaml
-   speaker_male_name: "Alex"
-   speaker_female_name: "Sam"
-   ```
-
-   The coach reminds you out loud if you enrolled a name that isn't configured
-   yet. Restart the add-on after changing it.
-
-**Verify it worked** in Home Assistant: `sensor.voicepe_<instance>_voice_prints`
-shows every enrolled print and — in its `active` attribute — which ones are
-live (enrolled *and* named in the configuration). Privacy: **OpenAI hears
-nothing during enrollment** — mic audio flows only to the local recorder
-(`/share/voice-enrollment/`), and prints live in `/share/voice-prints/`.
-
-Rebuilds and multi-recording prints are still available manually from inside
-the add-on container:
-
-```
-python3 -m app.build_voiceprint <name> <recording.wav> [more.wav ...]
+```yaml
+speaker_male_name: "Alex"
+speaker_female_name: "Sam"
 ```
 
-Options: `enrollment_phrase` (set it to your actual wake phrase),
-`enrollment_tts_voice` (the coach's voice), `wake_sound_entity` (auto-mutes the
-wake chime during the session so the coach stays audible).
+`sensor.voicepe_<instance>_voice_prints` shows provisioned prints and, in its
+`active` attribute, which names are configured. Creating trusted reference audio
+and new prints is an offline administrator task outside this rapid-pilot release.
 
 **Speaker-gated tools**: list tool names in `male_only_tools` and they execute only
 for the gated voice — enforced *below* the model, so it can't be talked around.
 Convenience gating, not biometric security.
 
-The same enrollment recordings double as wake-word training positives — one
-session per person feeds both systems.
-
----
-
 ## Voice-instructed memory
 
-Teach it standing rules by voice; they persist forever.
+When an administrator explicitly enables `enable_voice_memory`, the household can
+teach it standing rules by voice; they persist across rebuilds. The default is
+`false`: no memory tools are exposed and the memory file is not read.
 
 - **"Remember that we park at the north lot"** / **"From now on, use Celsius"** —
   the note becomes a standing instruction in every future conversation. It takes
@@ -212,7 +182,8 @@ device is connected (the caller should fall back to text). Full endpoint spec in
 
 Anything on your LAN can use the endpoint — it's a general "speak in this room"
 API for automations, not just agents. Generate a long random token; the add-on
-runs on the host network, so the token is the lock.
+runs on the host network, so the token is the lock. The add-on Configuration
+tab stores it in a masked password field.
 
 ---
 
@@ -224,7 +195,7 @@ voice. Up to 10 concurrent, 5 seconds to 24 hours.
 Expiry is polite, in three stages:
 
 1. **One personal spoken announcement** — *"Alex, your pasta timer is done"* —
-   addressed to whoever set it (via [speaker recognition](#speaker-recognition--voice-enrollment)).
+   addressed to whoever set it (via [speaker recognition](#speaker-recognition)).
    No nagging repeats.
 2. **A 20-second grace period.** Any wake of the device counts as
    acknowledgement — no bell.
@@ -252,33 +223,10 @@ Every wake's opening audio is archived locally (auto-pruned, newest 500 kept, in
 3. **Automatically** — a wake that you silence without ever speaking is labeled
    for you.
 
-Flagged captures become **hard negatives** for the next wake-word retrain — the
-model literally learns from its mistakes. The `false_wakes_today`
-[sensor](#ha-sensors) tracks how often it happens.
-
----
-
-## The retrain flywheel
-
-The wake word improves continuously from your household's real usage. The loop:
-
-1. **Enroll** — say *"train my voice"*. The coach collects 25 varied repetitions
-   plus 90 s of natural speech per person. Recordings stay on your machine.
-2. **Live labeling** — real usage [flags false wakes](#false-wake-flagging) as
-   hard negatives, automatically and by hand.
-3. **Retrain** — a weekly job (or manual run) trains microWakeWord on ~50k
-   synthetic voices plus your real repetitions (triple weight) plus your labeled
-   false wakes, calibrates the detection threshold against held-out audio, and
-   quality-gates the result against the current model — recall and false-accept
-   rate must not regress.
-4. **Stage, never auto-flash** — passing models are staged with their calibration
-   and you're notified. Deployment is always a deliberate flash; the previous
-   model stays in the firmware repo's `models/previous/` for one-step rollback.
-
-Result for this project's own model: detection cutoff 0.43 → 0.71 across three
-passes at ~97% recall — each pass trained on the mistakes of the last. Training
-runs in ~2 hours on any spare Apple Silicon or NVIDIA machine, with the
-community [microWakeWord Trainer](https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon).
+Flagged captures are retained as **hard negatives** for a deliberate external
+offline wake-word retraining workflow. This backend does not schedule training,
+capture positives, stage models, or flash firmware. The `false_wakes_today`
+[sensor](#ha-sensors) tracks how often false wakes occur.
 
 ---
 
@@ -335,11 +283,10 @@ for dashboards and automations:
 | `sensor.voicepe_kitchen_wakes_today` | wakes since midnight |
 | `sensor.voicepe_kitchen_false_wakes_today` | flagged false wakes since midnight |
 | `sensor.voicepe_kitchen_openai_cost_today` | estimated OpenAI spend today ($, per-response accounting) |
-| `sensor.voicepe_kitchen_voice_prints` | enrolled voice prints (attribute `active` = enrolled **and** configured) |
-| `binary_sensor.voicepe_kitchen_enrollment_active` | an enrollment session is running |
+| `sensor.voicepe_kitchen_voice_prints` | administrator-provisioned voice prints (attribute `active` = provisioned **and** configured) |
 
 The firmware separately exposes the device **phase** as a text sensor
-(`idle / waiting / listening / thinking / replying / enrolling`) — trigger
+(`idle / waiting / listening / thinking / replying`) — trigger
 automations on it, e.g. pause the kitchen speaker the instant a wake fires.
 
 ---
@@ -361,9 +308,8 @@ What you can and can't change:
   that timbre — the model follows direction. Example: `ballad` instructed into
   understated Received Pronunciation reads as a British butler.
 - **Speed** is a separate knob (`openai_speed`, 0.25–1.5).
-- **Spoken messages outside the conversation** (the enrollment coach, timer and
-  announce messages) use OpenAI's TTS voices and are configurable separately —
-  `enrollment_tts_voice` accepts any `/v1/audio/speech` voice.
+- **Spoken messages outside the conversation** (timer and authenticated announce
+  messages) use a separate guarded OpenAI TTS lane.
 
 Language: the Realtime model is multilingual. Set `transcription_language` to your
 ISO code and write your `instructions` in your language, keeping the same
@@ -379,8 +325,8 @@ Firmware niceties worth knowing about (all in the
 - **Thin audio client** (`va_client`): raw 16 kHz mic streaming up, 24 kHz reply
   playback down, jitter buffering, mic pre-roll, and reconnect logic. There is no
   Assist pipeline on the audio path.
-- **Phase text sensor** — `idle / waiting / listening / thinking / replying /
-  enrolling`, exposed to HA for automations.
+- **Phase text sensor** — `idle / waiting / listening / thinking / replying`,
+  exposed to HA for automations.
 - **Per-phase stop-word cutoffs** — "stop" is tuned per phase so the assistant's
   own voice can't false-trigger it; a **red confirmation flash** acknowledges
   your stop. Echo guards at the wake boundary are tunable from the backend

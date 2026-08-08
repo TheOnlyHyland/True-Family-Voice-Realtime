@@ -103,8 +103,11 @@ def register_openclaw_tool(llm) -> None:
                 r = await client.post(openclaw_url(), json={"question": question, "room": room})
                 r.raise_for_status()
                 answer = (r.json() or {}).get("answer", "").strip()
-        except Exception as e:
-            logger.warning(f"⚠️ ask_openclaw direct call failed: {e!r}")
+        except Exception as error:
+            logger.warning(
+                "⚠️ ask_openclaw direct call failed (%s)",
+                error.__class__.__name__,
+            )
             await params.result_callback({
                 "error": "The assistant could not be reached; try again shortly."})
             return
@@ -121,12 +124,15 @@ def register_openclaw_tool(llm) -> None:
                 r = await client.post(openclaw_url(), json={"recall": query})
                 r.raise_for_status()
                 matches = (r.json() or {}).get("matches", [])
-        except Exception as e:
-            logger.warning(f"⚠️ recall_memory failed: {e!r}")
+        except Exception as error:
+            logger.warning(
+                "⚠️ recall_memory failed (%s)",
+                error.__class__.__name__,
+            )
             await params.result_callback({
                 "matches": [], "note": "recall unavailable — use ask_openclaw"})
             return
-        logger.info(f"🔎 recall_memory '{query}' -> {len(matches)} lines")
+        logger.info(f"🔎 recall_memory returned {len(matches)} lines")
         await params.result_callback({
             "matches": matches,
             "note": "" if matches else "nothing found — ask_openclaw may know more",

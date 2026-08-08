@@ -1,14 +1,17 @@
 #!/usr/bin/with-contenv bashio
 set -e
 
+# CI uses the image's real CMD and this exact script before publication. Keep
+# the smoke ahead of bashio option reads so it needs no Supervisor runtime.
+if [ "${TRUE_FAMILY_VOICE_STARTUP_SMOKE:-}" = "1" ]; then
+    exec python -m app.main --startup-smoke
+fi
+
 # --- 🔑 Basics ---
 OPENAI_API_KEY=$(bashio::config 'openai_api_key')
 SPEAKER_MALE_NAME=$(bashio::config 'speaker_male_name')
-WAKE_SOUND_ENTITY=$(bashio::config 'wake_sound_entity')
 TIMER_RING_ENTITY=$(bashio::config 'timer_ring_entity')
 INSTANCE_NAME=$(bashio::config 'instance_name')
-ENROLLMENT_PHRASE=$(bashio::config 'enrollment_phrase')
-ENROLLMENT_TTS_VOICE=$(bashio::config 'enrollment_tts_voice')
 SPEAKER_FEMALE_NAME=$(bashio::config 'speaker_female_name')
 MALE_ONLY_TOOLS=$(bashio::config 'male_only_tools')
 INSTRUCTIONS=$(bashio::config 'instructions')
@@ -39,6 +42,8 @@ NOISE_REDUCTION=$(bashio::config 'noise_reduction')
 HA_MCP_URL=$(bashio::config 'ha_mcp_url')
 LONGLIVED_TOKEN=$(bashio::config 'longlived_token')
 MCP_TOOL_ALLOWLIST=$(bashio::config 'mcp_tool_allowlist')
+NEARBY_MEDIA_PLAYERS=$(bashio::config 'nearby_media_players')
+ENABLE_VOICE_MEMORY=$(bashio::config 'enable_voice_memory')
 OPENCLAW_URL=$(bashio::config 'openclaw_url')
 ANNOUNCE_PORT=$(bashio::config 'announce_port')
 ANNOUNCE_TOKEN=$(bashio::config 'announce_token')
@@ -57,15 +62,20 @@ if [ -z "$OPENAI_API_KEY" ]; then
     bashio::log.error "OPENAI_API_KEY is required but not set"
     exit 1
 fi
+if [ "$FOLLOW_UP_LISTEN_SECONDS" != "0" ]; then
+    bashio::log.error "follow_up_listen_seconds must be 0 for the 0.21.0 rapid pilot"
+    exit 1
+fi
+if [ -z "$NEARBY_MEDIA_PLAYERS" ]; then
+    bashio::log.error "nearby_media_players must list the exact Living Room TV and Chromecast entities for the 0.21.0 rapid pilot"
+    exit 1
+fi
 
 # Export environment variables
 export OPENAI_API_KEY
 export SPEAKER_MALE_NAME
-export WAKE_SOUND_ENTITY
 export TIMER_RING_ENTITY
 export INSTANCE_NAME
-export ENROLLMENT_PHRASE
-export ENROLLMENT_TTS_VOICE
 export SPEAKER_FEMALE_NAME
 export MALE_ONLY_TOOLS
 export INSTRUCTIONS
@@ -85,6 +95,8 @@ export PLAYBACK_PREBUFFER_MS
 export NOISE_REDUCTION
 export LONGLIVED_TOKEN
 export MCP_TOOL_ALLOWLIST
+export NEARBY_MEDIA_PLAYERS
+export ENABLE_VOICE_MEMORY
 export OPENCLAW_URL
 export ANNOUNCE_PORT
 export ANNOUNCE_TOKEN
@@ -115,11 +127,11 @@ if bashio::config.has_value 'transcription_model_custom'; then
     export TRANSCRIPTION_MODEL_CUSTOM
 fi
 
-# Legacy server_vad escape hatch (⚙️ Advanced, optional WITHOUT defaults).
+# Legacy server_vad saved-config fields (⚙️ Advanced, optional WITHOUT defaults).
 # bashio::config prints the string "null" for unset optional keys, which would
 # crash main.py's float()/int() parsing — so only export when actually set.
-# Unset = main.py's hardwired defaults (semantic_vad; 0.5/300/800 if server_vad
-# is ever selected).
+# Unset = mandatory semantic_vad. A saved server_vad selection reaches main.py's
+# explicit rapid-pilot startup error.
 if bashio::config.has_value 'turn_detection_type'; then
     TURN_DETECTION_TYPE=$(bashio::config 'turn_detection_type')
     export TURN_DETECTION_TYPE
@@ -144,7 +156,7 @@ fi
 export INTERRUPT_RESPONSE=false
 
 # Removed options (v0.4.29) — no longer exported; main.py env defaults take
-# over: SEMANTIC_VAD_CREATE_RESPONSE=true, ENABLE_DISCONNECT_TOOL=false,
+# over: backend-owned response creation, ENABLE_DISCONNECT_TOOL=false,
 # DEVICE_INPUT_SAMPLE_RATE=16000.
 
 # Export HA_MCP_URL if set (empty string means use default in main.py)
@@ -156,4 +168,4 @@ fi
 
 # Start the application
 export PYTHONUNBUFFERED=1
-exec python3 -m app.main
+exec python -m app.main
