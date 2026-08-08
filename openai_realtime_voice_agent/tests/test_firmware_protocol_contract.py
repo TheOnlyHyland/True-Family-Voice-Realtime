@@ -62,8 +62,8 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             (ADDON_ROOT / "poetry.lock").read_bytes()
         ).hexdigest()
 
-        self.assertEqual(repository["addons"][0]["version"], "0.21.0")
-        self.assertEqual(pyproject["tool"]["poetry"]["version"], "0.21.0")
+        self.assertEqual(repository["addons"][0]["version"], "0.21.1")
+        self.assertEqual(pyproject["tool"]["poetry"]["version"], "0.21.1")
         locked_versions = {
             package["name"]: package["version"]
             for package in lock["package"]
@@ -75,7 +75,7 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             lock_digest,
             "13193c62fc95a0c05c7b6e89efe7db060b4f00438db46c83dc43a23eb1d9af15",
         )
-        self.assertIn('version: "0.21.0"', config)
+        self.assertIn('version: "0.21.1"', config)
         self.assertIn('follow_up_listen_seconds: 0', config)
         self.assertIn("needs: test", workflow)
         self.assertIn('"poetry==$POETRY_VERSION"', workflow)

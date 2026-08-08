@@ -2,18 +2,18 @@
 
 ## Compatibility Order
 
-Version 0.21.0 is a coordinated protocol release and requires Voice PE firmware
+Version 0.21.1 is a coordinated protocol release and requires Voice PE firmware
 0.19.0 or newer.
 
 > **Upgrade firmware first.** Keep the existing backend running, update and
-> verify the device firmware, then update the backend to 0.21.0. Starting the
-> 0.21.0 backend against older firmware is unsupported and must not be used as a
+> verify the device firmware, then update the backend to 0.21.1. Starting the
+> 0.21.1 backend against older firmware is unsupported and must not be used as a
 > rollout shortcut.
 
 > **Rollback the backend first.** Keep the newer firmware running, roll the
 > backend back to the previously compatible version and verify reconnection,
 > then roll back firmware if still necessary. Rolling firmware back while the
-> 0.21.0 backend is running reverses the safe compatibility order.
+> 0.21.1 backend is running reverses the safe compatibility order.
 
 ## Published Artifact
 
@@ -75,7 +75,7 @@ verification always requires the public firmware tag and exact release assets.
 
 ## Accepted Rapid-Pilot Privileges
 
-Version 0.21.0 deliberately inherits the pilot's `host_network: true`,
+Version 0.21.1 deliberately inherits the pilot's `host_network: true`,
 `homeassistant_api: true`, and read-write `/share` mount. These remain accepted
 deployment risks, not reduced-sandbox claims: a backend compromise can reach the
 host network, use the add-on's Home Assistant API credential, and alter the
@@ -103,7 +103,7 @@ build, not the release artifact consumed by normal installations.
 1. Commit the exact release candidate on a reviewed release branch and let its
    normal CI pass. Do not merge the version bump to `main` yet.
 2. Manually dispatch **Build and Publish Home Assistant Addon** from that exact
-   candidate commit with `publish=true`, `release_tag=v0.21.0`, and
+   candidate commit with `publish=true`, `release_tag=v0.21.1`, and
    `source_commit=<the same 40-character commit>`.
 3. Approve its protected `backend-production` environment gate only after both
    architecture build-and-smoke jobs pass.
@@ -112,10 +112,10 @@ build, not the release artifact consumed by normal installations.
    digests.
 6. Only after the images exist, merge the identical candidate source to `main`.
    This is the step that exposes the repository update to Home Assistant users.
-7. Tag the reviewed candidate commit `v0.21.0`; only then publish the GitHub release.
+7. Tag the reviewed candidate commit `v0.21.1`; only then publish the GitHub release.
    The release event is verification-only and must not build or push an image.
 
-The publication workflow refuses to overwrite either an existing `0.21.0` tag
+The publication workflow refuses to overwrite either an existing `0.21.1` tag
 or its source-commit tag. A partially published failed run must be investigated;
 do not delete or replace a successful architecture tag without treating that as
 a new release version.

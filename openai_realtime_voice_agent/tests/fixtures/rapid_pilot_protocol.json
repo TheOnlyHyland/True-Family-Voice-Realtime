@@ -1,5 +1,5 @@
 {
-  "backend_version": "0.21.0",
+  "backend_version": "0.21.1",
   "legacy_backend_version": "0.20.6",
   "minimum_firmware_version": "0.19.0",
   "validated_firmware_release": {

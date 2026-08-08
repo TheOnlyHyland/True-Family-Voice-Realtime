@@ -20,11 +20,10 @@ class FollowUpReservationOutcome(str, Enum):
 
 
 def get_request_follow_up_tool_definition() -> Dict[str, Any]:
-    """Return the strict OpenAI function schema for one necessary follow-up."""
+    """Return the Realtime-compatible schema for one necessary follow-up."""
     return {
         "type": "function",
         "name": REQUEST_FOLLOW_UP_TOOL_NAME,
-        "strict": True,
         "description": (
             "Call as the sole tool immediately before asking exactly one short, "
             "necessary question, and only when the user's request cannot be completed "
