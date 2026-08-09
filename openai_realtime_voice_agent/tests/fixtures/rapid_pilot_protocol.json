@@ -12,15 +12,6 @@
     "elf_sha256": "9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88",
     "sha256sums_sha256": "280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3"
   },
-  "regression_firmware_version": "0.19.0",
-  "regression_firmware_release": {
-    "version": "0.19.0",
-    "manifest_sha256": "b9b12d87346148d5260a53d6303eb8c44ffb3cd24d6eb5c1a0017baccdc3a9d3",
-    "factory_sha256": "7f0ffaeaecb861ceb342ad571501b14c6017161bbb6d90f489002ae4271f6b14",
-    "ota_sha256": "68ab4263b407244d5cce05d7a81888604bd90dccfb38e93c8a63f4a55a070ad8",
-    "elf_sha256": "d1f77ac2f71a6491bd750f44efa5e6bacdd977edc945b6ef20d241995e843775",
-    "sha256sums_sha256": "fb4f71aebb6556ca6b6f659832943c698400f62cb9ee44bc1a10b2f5894050ce"
-  },
   "transport_security": "unauthenticated_plaintext_trusted_lan_only",
   "audio": {
     "sample_rate_hz": 24000,

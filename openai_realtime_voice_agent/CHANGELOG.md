@@ -8,7 +8,9 @@ All notable changes to this add-on. Newest first.
   `TheOnlyHyland/True-Family-Voice-Firmware` source commit
   `36abf4ba861e2ca30968882311ed3b2562b47367` and its exact manifest, factory,
   OTA, ELF, and `SHA256SUMS` hashes. Publication and release CI require those
-  exact inputs; firmware `0.19.0` remains separate regression evidence only.
+  exact package inputs. Every PR, manual, publication, and release test also
+  checks out that exact firmware source and validates the full protocol contract,
+  including tokenized follow-up progression phases.
 - Follow-up turns are now serial rather than count-limited. The model may request
   one useful question at a time and rearm only after the current OPEN window is
   consumed by a genuine answer bound to its exact fresh speech-start item and

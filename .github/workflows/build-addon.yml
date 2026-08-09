@@ -56,14 +56,6 @@ env:
   FIRMWARE_RELEASE_OTA_SHA256: a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38
   FIRMWARE_RELEASE_ELF_SHA256: 9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88
   FIRMWARE_RELEASE_SHA256SUMS_SHA256: 280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3
-  REGRESSION_FIRMWARE_VERSION: 0.19.0
-  REGRESSION_FIRMWARE_SOURCE_COMMIT: bcb3bf4cbf181397b51aa7cc5bca5cfecefc7b3a
-  REGRESSION_FIRMWARE_REPOSITORY: TheOnlyHyland/True-Family-Voice-Firmware
-  REGRESSION_FIRMWARE_MANIFEST_SHA256: b9b12d87346148d5260a53d6303eb8c44ffb3cd24d6eb5c1a0017baccdc3a9d3
-  REGRESSION_FIRMWARE_FACTORY_SHA256: 7f0ffaeaecb861ceb342ad571501b14c6017161bbb6d90f489002ae4271f6b14
-  REGRESSION_FIRMWARE_OTA_SHA256: 68ab4263b407244d5cce05d7a81888604bd90dccfb38e93c8a63f4a55a070ad8
-  REGRESSION_FIRMWARE_ELF_SHA256: d1f77ac2f71a6491bd750f44efa5e6bacdd977edc945b6ef20d241995e843775
-  REGRESSION_FIRMWARE_SHA256SUMS_SHA256: fb4f71aebb6556ca6b6f659832943c698400f62cb9ee44bc1a10b2f5894050ce
   POETRY_LOCK_SHA256: 13193c62fc95a0c05c7b6e89efe7db060b4f00438db46c83dc43a23eb1d9af15
   TITANET_MODEL_SHA256: d51abcf31717ef28162f26acb9d44dd4127c3d44c9b8624f699f3425daca8e77
   TITANET_MODEL_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_large.onnx
@@ -116,23 +108,22 @@ jobs:
             [[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]]
           done
 
-      - name: Checkout exact regression firmware source commit
-        if: ${{ github.event_name != 'release' && (github.event_name != 'workflow_dispatch' || !inputs.publish) }}
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: ${{ env.REGRESSION_FIRMWARE_REPOSITORY }}
-          ref: ${{ env.REGRESSION_FIRMWARE_SOURCE_COMMIT }}
-          path: firmware-candidate
-          persist-credentials: false
-
       - name: Checkout exact release firmware source commit
-        if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ env.FIRMWARE_RELEASE_REPOSITORY }}
           ref: ${{ env.FIRMWARE_RELEASE_SOURCE_COMMIT }}
           path: firmware-candidate
           persist-credentials: false
+
+      - name: Verify exact release firmware source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C firmware-candidate rev-parse HEAD)" = \
+            "$FIRMWARE_RELEASE_SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < firmware-candidate/VERSION)" = \
+            "$FIRMWARE_RELEASE_VERSION"
 
       - name: Download and verify immutable release firmware package
         if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
@@ -162,10 +153,6 @@ jobs:
           test "$(sha256sum "$PACKAGE_ROOT/SHA256SUMS")" = \
             "$FIRMWARE_RELEASE_SHA256SUMS_SHA256  $PACKAGE_ROOT/SHA256SUMS"
           (cd "$PACKAGE_ROOT" && sha256sum --check SHA256SUMS)
-          test "$(git -C firmware-candidate rev-parse HEAD)" = \
-            "$FIRMWARE_RELEASE_SOURCE_COMMIT"
-          test "$(tr -d '\r\n' < firmware-candidate/VERSION)" = \
-            "$FIRMWARE_RELEASE_VERSION"
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -189,7 +176,7 @@ jobs:
           "$VENV/bin/python" -c 'from importlib.metadata import version; assert version("pipecat-ai") == "0.0.97"; assert version("numpy") == "2.2.6"; assert version("loguru") == "0.7.3"'
           echo "$VENV/bin" >> "$GITHUB_PATH"
 
-      - name: Run backend tests against selected firmware evidence
+      - name: Run backend tests against exact firmware source and release evidence
         working-directory: openai_realtime_voice_agent
         env:
           TRUE_FAMILY_VOICE_FIRMWARE_ROOT: ${{ github.workspace }}/firmware-candidate

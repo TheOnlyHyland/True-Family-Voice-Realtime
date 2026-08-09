@@ -51,6 +51,7 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("ADDON_VERSION: 0.22.0", workflow)
         self.assertIn("FIRMWARE_RELEASE_BINDING: finalized", workflow)
         self.assertNotIn("FIRMWARE_RELEASE_BINDING: pending", workflow)
+        self.assertNotIn("REGRESSION_FIRMWARE_", workflow)
         self.assertIn("BUILD_REVISION=${{ github.sha }}", workflow)
         self.assertIn("org.opencontainers.image.revision", dockerfile)
         self.assertIn("io.true-family.voice.poetry-lock-sha256", dockerfile)
@@ -109,6 +110,8 @@ class ReleaseHardeningTests(unittest.TestCase):
             "Verify release artifact was published first",
             'test "$VERSION_MANIFEST" = "$SOURCE_MANIFEST"',
             "Require finalized exact firmware release binding",
+            "Checkout exact release firmware source commit",
+            "Verify exact release firmware source checkout",
             'test "$FIRMWARE_RELEASE_BINDING" = "finalized"',
             'test "$FIRMWARE_RELEASE_VERSION" = "0.20.0"',
             "FIRMWARE_RELEASE_SOURCE_COMMIT: "
@@ -194,7 +197,8 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("firmware first", docs)
         self.assertIn("backend first", docs)
         self.assertIn("firmware 0.20.0", docs)
-        self.assertIn("firmware 0.19.0", docs)
+        self.assertIn("backend 0.21.1", docs)
+        self.assertIn("0.20.6", docs)
         self.assertIn("binding is finalized", docs)
         self.assertNotIn("firmware binding is pending", docs)
         self.assertIn(

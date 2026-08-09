@@ -46,9 +46,8 @@ FINAL_FIRMWARE_RELEASE = {
 }
 
 DEFAULT_FIRMWARE_ROOT = Path(__file__).resolve().parents[3] / "firmware"
-FIRMWARE_ROOT = Path(
-    os.environ.get("TRUE_FAMILY_VOICE_FIRMWARE_ROOT", DEFAULT_FIRMWARE_ROOT)
-)
+_FIRMWARE_ROOT = os.environ.get("TRUE_FAMILY_VOICE_FIRMWARE_ROOT", "")
+FIRMWARE_ROOT = Path(_FIRMWARE_ROOT) if _FIRMWARE_ROOT else DEFAULT_FIRMWARE_ROOT
 COMPONENT_ROOT = FIRMWARE_ROOT / "esphome" / "components" / "va_client"
 _FIRMWARE_ARTIFACT_ROOT = os.environ.get(
     "TRUE_FAMILY_VOICE_FIRMWARE_ARTIFACT_ROOT",
@@ -60,6 +59,7 @@ FIRMWARE_ARTIFACT_ROOT = (
 REQUIRE_EXTERNAL_FIRMWARE = (
     os.environ.get("TRUE_FAMILY_VOICE_REQUIRE_FIRMWARE_VALIDATION", "") == "1"
 )
+REQUIRE_EXTERNAL_FIRMWARE_SOURCE = bool(_FIRMWARE_ROOT) or REQUIRE_EXTERNAL_FIRMWARE
 
 
 class FirmwareProtocolContractTests(unittest.TestCase):
@@ -103,13 +103,23 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         self.assertIn('"poetry-core==$POETRY_CORE_VERSION"', workflow)
         self.assertIn("python -m unittest discover -s tests -v", workflow)
         self.assertIn("poetry sync --only main --no-root", workflow)
-        self.assertIn("Checkout exact regression firmware source commit", workflow)
+        self.assertIn("Checkout exact release firmware source commit", workflow)
+        self.assertIn("Verify exact release firmware source checkout", workflow)
+        self.assertNotIn("Checkout exact regression firmware source commit", workflow)
         self.assertIn(
             "Download and verify immutable release firmware package",
             workflow,
         )
-        self.assertIn("TRUE_FAMILY_VOICE_REQUIRE_FIRMWARE_VALIDATION:", workflow)
-        self.assertIn("ref: ${{ env.REGRESSION_FIRMWARE_SOURCE_COMMIT }}", workflow)
+        self.assertEqual(
+            workflow.count("TRUE_FAMILY_VOICE_REQUIRE_FIRMWARE_VALIDATION:"),
+            1,
+        )
+        self.assertIn(
+            "TRUE_FAMILY_VOICE_REQUIRE_FIRMWARE_VALIDATION: ${{ "
+            "(github.event_name == 'release' || (github.event_name == "
+            "'workflow_dispatch' && inputs.publish)) && '1' || '0' }}",
+            workflow,
+        )
         release_env = {
             "FIRMWARE_RELEASE_BINDING": "finalized",
             "FIRMWARE_RELEASE_VERSION": FINAL_FIRMWARE_RELEASE["version"],
@@ -133,12 +143,36 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             self.assertIn(f"{field}: {value}", workflow)
         self.assertIn("ref: ${{ env.FIRMWARE_RELEASE_SOURCE_COMMIT }}", workflow)
         self.assertIn('[[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]]', workflow)
-        self.assertIn("REGRESSION_FIRMWARE_VERSION: 0.19.0", workflow)
+        self.assertNotIn("REGRESSION_FIRMWARE_", workflow)
+        source_checkout = workflow.split(
+            "      - name: Checkout exact release firmware source commit\n",
+            1,
+        )[1].split("\n      - name:", 1)[0]
+        self.assertNotRegex(source_checkout, re.compile(r"^\s*if:", re.MULTILINE))
         self.assertIn(
-            "REGRESSION_FIRMWARE_SOURCE_COMMIT: "
-            "bcb3bf4cbf181397b51aa7cc5bca5cfecefc7b3a",
+            "repository: ${{ env.FIRMWARE_RELEASE_REPOSITORY }}",
+            source_checkout,
+        )
+        self.assertIn("ref: ${{ env.FIRMWARE_RELEASE_SOURCE_COMMIT }}", source_checkout)
+        self.assertIn(
+            'test "$(git -C firmware-candidate rev-parse HEAD)" =',
             workflow,
         )
+        source_verify = workflow.split(
+            "      - name: Verify exact release firmware source checkout\n",
+            1,
+        )[1].split("\n      - name:", 1)[0]
+        self.assertNotRegex(source_verify, re.compile(r"^\s*if:", re.MULTILINE))
+        self.assertIn(
+            'test "$(tr -d \'\\r\\n\' < firmware-candidate/VERSION)" =',
+            source_verify,
+        )
+        package_step = workflow.split(
+            "      - name: Download and verify immutable release firmware package\n",
+            1,
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("github.event_name == 'release'", package_step)
+        self.assertIn("inputs.publish", package_step)
         self.assertIn(
             "Require finalized exact firmware release binding",
             workflow,
@@ -170,28 +204,8 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             CONTRACT["firmware_release_binding"],
             FINAL_FIRMWARE_RELEASE,
         )
-        self.assertEqual(CONTRACT["regression_firmware_version"], "0.19.0")
-        self.assertEqual(
-            CONTRACT["regression_firmware_release"],
-            {
-                "version": "0.19.0",
-                "manifest_sha256": (
-                    "b9b12d87346148d5260a53d6303eb8c44ffb3cd24d6eb5c1a0017baccdc3a9d3"
-                ),
-                "factory_sha256": (
-                    "7f0ffaeaecb861ceb342ad571501b14c6017161bbb6d90f489002ae4271f6b14"
-                ),
-                "ota_sha256": (
-                    "68ab4263b407244d5cce05d7a81888604bd90dccfb38e93c8a63f4a55a070ad8"
-                ),
-                "elf_sha256": (
-                    "d1f77ac2f71a6491bd750f44efa5e6bacdd977edc945b6ef20d241995e843775"
-                ),
-                "sha256sums_sha256": (
-                    "fb4f71aebb6556ca6b6f659832943c698400f62cb9ee44bc1a10b2f5894050ce"
-                ),
-            },
-        )
+        self.assertNotIn("regression_firmware_version", CONTRACT)
+        self.assertNotIn("regression_firmware_release", CONTRACT)
         self.assertEqual(CONTRACT["max_control_message_bytes"], 2048)
         self.assertEqual(CONTRACT["max_protocol_id"], 0x7FFFFFFF)
         self.assertEqual(
@@ -332,12 +346,8 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         ):
             self.assertIn(term, source)
 
-    def test_external_selected_firmware_artifact_matches_vendored_release(self):
-        release = (
-            CONTRACT["firmware_release_binding"]
-            if REQUIRE_EXTERNAL_FIRMWARE
-            else CONTRACT["regression_firmware_release"]
-        )
+    def test_external_release_firmware_artifact_matches_vendored_release(self):
+        release = CONTRACT["firmware_release_binding"]
         artifact_root = FIRMWARE_ARTIFACT_ROOT
         if artifact_root is None or not artifact_root.is_dir():
             if REQUIRE_EXTERNAL_FIRMWARE:
@@ -382,21 +392,16 @@ class FirmwareProtocolContractTests(unittest.TestCase):
 
     def test_external_firmware_source_matches_vendored_contract(self):
         if not (COMPONENT_ROOT / "va_client.cpp").is_file():
-            if REQUIRE_EXTERNAL_FIRMWARE:
+            if REQUIRE_EXTERNAL_FIRMWARE_SOURCE:
                 self.fail("required exact firmware source checkout is absent")
             self.skipTest("optional sibling firmware checkout is not present")
         actual_version = (FIRMWARE_ROOT / "VERSION").read_text(
             encoding="utf-8"
         ).strip()
-        expected_version = (
-            CONTRACT["firmware_release_binding"]["version"]
-            if REQUIRE_EXTERNAL_FIRMWARE
-            else CONTRACT["regression_firmware_release"]["version"]
-        )
-        if actual_version != expected_version and not REQUIRE_EXTERNAL_FIRMWARE:
+        expected_version = CONTRACT["firmware_release_binding"]["version"]
+        if actual_version != expected_version and not REQUIRE_EXTERNAL_FIRMWARE_SOURCE:
             self.skipTest(
-                "optional sibling firmware checkout does not match the "
-                "regression fixture"
+                "optional sibling firmware checkout does not match the release binding"
             )
         self.assertEqual(
             actual_version,
@@ -444,7 +449,7 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         self.assertIn("kProtocolTokenMax = 0x7FFFFFFF", safety)
 
         inbound_shapes = {
-            tuple(re.findall(r'"([a-z_]+)"', fields))
+            tuple(sorted(re.findall(r'"([a-z_]+)"', fields)))
             for fields in re.findall(
                 r"message\.has_exact\(\s*\{([^}]*)\}\s*\)",
                 cpp,
@@ -452,9 +457,9 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             )
         }
         for fields in CONTRACT["trusted_backend_to_device_fields"].values():
-            self.assertIn(tuple(fields), inbound_shapes)
+            self.assertIn(tuple(sorted(fields)), inbound_shapes)
         for fields in CONTRACT["legacy_backend_to_device_fields"].values():
-            self.assertIn(tuple(fields), inbound_shapes)
+            self.assertIn(tuple(sorted(fields)), inbound_shapes)
 
         sender_ranges = {
             "button_cancel": (

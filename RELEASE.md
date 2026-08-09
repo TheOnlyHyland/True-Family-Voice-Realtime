@@ -21,9 +21,7 @@ The exact Voice PE firmware binding for backend 0.22.0 is finalized:
 The workflow records `FIRMWARE_RELEASE_BINDING: finalized`. Publication and
 release jobs still fail closed unless every value above is exact, the public
 firmware package matches every hash, and the checked-out source has the exact
-commit and version. The immutable firmware 0.19.0 values retained separately in
-this repository remain regression evidence for the previous release; they are
-not the 0.22.0 release binding and cannot authorize publication.
+commit and version.
 
 > **Upgrade firmware first.** Keep the existing backend running, update and
 > verify exact firmware 0.20.0, then update to backend 0.22.0 only after its
@@ -32,9 +30,10 @@ not the 0.22.0 release binding and cannot authorize publication.
 > artifact.
 
 > **Rollback the backend first.** Keep the newer firmware running, roll the
-> backend back to the previously compatible version and verify reconnection,
-> then roll back firmware if still necessary. Rolling firmware back while a
-> newer backend is running reverses the safe compatibility order.
+> backend back to 0.21.1, or to the documented legacy 0.20.6 path when required,
+> and verify reconnection before considering any firmware rollback. Rolling
+> firmware back while a newer backend is running reverses the safe compatibility
+> order.
 
 ## Published Artifact
 
@@ -64,25 +63,13 @@ Only after those checks does CI save and hash the exact image. A protected
 publication job loads that saved image, verifies the image ID and archive hash,
 and pushes it without rebuilding.
 
-The backend's read-only regression fixture remains aligned to the historical
-firmware `0.19.0` artifact: manifest SHA-256
-`b9b12d87346148d5260a53d6303eb8c44ffb3cd24d6eb5c1a0017baccdc3a9d3`, factory
-SHA-256 `7f0ffaeaecb861ceb342ad571501b14c6017161bbb6d90f489002ae4271f6b14`,
-and OTA SHA-256
-`68ab4263b407244d5cce05d7a81888604bd90dccfb38e93c8a63f4a55a070ad8`.
-The corresponding ELF SHA-256 is
-`d1f77ac2f71a6491bd750f44efa5e6bacdd977edc945b6ef20d241995e843775`,
-and the exact `SHA256SUMS` file SHA-256 is
-`fb4f71aebb6556ca6b6f659832943c698400f62cb9ee44bc1a10b2f5894050ce`.
-The firmware artifact is not copied into or modified by this repository.
-
-Normal source CI checks out the historical firmware `0.19.0` commit and validates
-the source-level protocol shapes as a regression gate. A standalone local test
-run may use the committed fixture when external inputs are absent. Publication
-and release CI instead checks out exact firmware 0.20.0 source commit
-`36abf4ba861e2ca30968882311ed3b2562b47367`, downloads its public release
-package, and requires every finalized hash above. The historical evidence does
-not satisfy or replace that 0.22.0 release gate.
+Every PR, manual, publication, and release test job checks out exact firmware
+0.20.0 source commit `36abf4ba861e2ca30968882311ed3b2562b47367` and validates the full source-level
+protocol contract, including the tokenized `follow_up_progress_phase` shape.
+Prepared package assets are not assumed public during PR or non-publishing manual
+CI, so those jobs do not download or require them. Publication and release jobs
+additionally download the immutable public package and require every finalized
+hash above. Package evidence is never allowed to replace exact source validation.
 
 The historical `pilot_firmware_source_only` workflow input is retained for
 auditability but cannot authorize a 0.22.0 image or public GitHub release. Every
@@ -95,7 +82,7 @@ verification enforces the same public binding.
 The finalized firmware 0.20.0 binding must implement the fixture's exact
 `follow_up_progress_phase` shape: `type`, `value`, `token`, `session_nonce`, and
 `wake_generation`. Initial physical-wake phases retain the existing trusted
-four-field shape, and the historical two-field phase remains regression-only.
+four-field shape, and the historical two-field phase remains legacy-only.
 The backend emits tokenized `listening`, `thinking`, and `replying` progression
 only for the current answer to an OPEN follow-up transaction. Terminal `idle` is
 always tokenless and a token-bearing terminal phase is rejected. Phase authority
