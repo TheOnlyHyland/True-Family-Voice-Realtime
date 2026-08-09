@@ -38,8 +38,8 @@ class RequestFollowUpToolTests(unittest.IsolatedAsyncioTestCase):
                         "type": "string",
                         "enum": ["conversational_turn"],
                         "description": (
-                            "Use when exactly one more user answer would make the active "
-                            "conversation more useful."
+                            "Use before one question that expects the user's immediate "
+                            "answer, including one step in a multi-question sequence."
                         ),
                     }
                 },
@@ -48,11 +48,12 @@ class RequestFollowUpToolTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         description = definition["description"]
-        self.assertIn("sole tool immediately before", description)
+        self.assertIn("Mandatory before any spoken or written question", description)
+        self.assertIn("first question in a user-requested", description)
+        self.assertIn("sole output", description)
+        self.assertIn("no speech, text, or other tool", description)
         self.assertIn("exactly one short question", description)
-        self.assertIn("another user turn would be useful", description)
-        self.assertIn("called again after each genuine answer", description)
-        self.assertIn("never ask more than one question", description)
+        self.assertIn("Call again after each genuine relevant answer", description)
 
     async def test_handler_reserves_before_instructing_one_short_question(self):
         events = []

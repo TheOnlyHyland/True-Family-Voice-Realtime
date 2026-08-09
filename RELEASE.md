@@ -2,7 +2,7 @@
 
 ## Compatibility Order
 
-The exact Voice PE firmware binding for backend 0.22.2 is finalized:
+The exact Voice PE firmware binding for backend 0.22.3 is finalized:
 
 - Firmware version: `0.20.0`
 - Repository: `TheOnlyHyland/True-Family-Voice-Firmware`
@@ -24,8 +24,8 @@ firmware package matches every hash, and the checked-out source has the exact
 commit and version.
 
 > **Upgrade firmware first.** Keep the existing backend running, update and
-> verify exact firmware 0.20.0, then update to backend 0.22.2 only after its
-> protected images and GitHub release exist. Starting backend 0.22.2 before the
+> verify exact firmware 0.20.0, then update to backend 0.22.3 only after its
+> protected images and GitHub release exist. Starting backend 0.22.3 before the
 > firmware update succeeds is unsupported. A source checkout is not a release
 > artifact.
 
@@ -73,8 +73,8 @@ additionally download the immutable public package and require every finalized
 hash above. Package evidence is never allowed to replace exact source validation.
 
 The historical `pilot_firmware_source_only` workflow input is retained for
-auditability but cannot authorize a 0.22.2 image or public GitHub release. Every
-0.22.2 publication requires `pilot_firmware_source_only=false`, a finalized public
+auditability but cannot authorize a 0.22.3 image or public GitHub release. Every
+0.22.3 publication requires `pilot_firmware_source_only=false`, a finalized public
 firmware source commit, and every exact release-artifact hash. Release-event
 verification enforces the same public binding.
 
@@ -100,7 +100,7 @@ a later round.
 
 ## Silent Terminal Decision Gate
 
-For the response to one freshly confirmed follow-up answer, backend 0.22.2 holds
+For the response to one freshly confirmed follow-up answer, backend 0.22.3 holds
 text, audio transcript, and PCM for at most 500 ms or 48,000 PCM bytes. Normal
 speech is released after that bound; a separate 512-event cap prevents
 zero-length delta floods from bypassing the memory limit. Held output is
@@ -117,7 +117,7 @@ events before audio deltas.
 
 ## Response-Generation Audio Barrier
 
-Backend 0.22.2 binds each assistant PCM source frame, Pipecat chunker operation,
+Backend 0.22.3 binds each assistant PCM source frame, Pipecat chunker operation,
 queued chunk, adapter-owned partial buffer, and active WebSocket write to the exact admitted
 socket and `(response_id, response_generation)`. A tool continuation waits for
 response A to finish before it arms a follow-up or creates response B. The drain
@@ -138,7 +138,7 @@ continuation may create response B on that path.
 
 ## Accepted Rapid-Pilot Privileges
 
-Version 0.22.2 deliberately inherits the pilot's `host_network: true`,
+Version 0.22.3 deliberately inherits the pilot's `host_network: true`,
 `homeassistant_api: true`, and read-write `/share` mount. These remain accepted
 deployment risks, not reduced-sandbox claims: a backend compromise can reach the
 host network, use the add-on's Home Assistant API credential, and alter the
@@ -170,7 +170,7 @@ its normal CI passes; never treat a source checkout as an installable release.
 1. Commit the exact release candidate on a reviewed release branch and let its
    normal CI pass. Do not merge the version bump to `main` yet.
 2. Manually dispatch **Build and Publish Home Assistant Addon** from that exact
-   candidate commit with `publish=true`, `release_tag=v0.22.2`, and
+   candidate commit with `publish=true`, `release_tag=v0.22.3`, and
    `source_commit=<the same 40-character commit>`. Keep
    `pilot_firmware_source_only=false`.
 3. Approve its protected `backend-production` environment gate only after both
@@ -180,10 +180,10 @@ its normal CI passes; never treat a source checkout as an installable release.
    digests.
 6. Only after the images exist, merge the identical candidate source to `main`.
    This is the step that exposes the repository update to Home Assistant users.
-7. Tag the reviewed candidate commit `v0.22.2`; only then publish the GitHub release.
+7. Tag the reviewed candidate commit `v0.22.3`; only then publish the GitHub release.
    The release event is verification-only and must not build or push an image.
 
-The publication workflow refuses to overwrite either an existing `0.22.2` tag
+The publication workflow refuses to overwrite either an existing `0.22.3` tag
 or its source-commit tag. A partially published failed run must be investigated;
 do not delete or replace a successful architecture tag without treating that as
 a new release version.

@@ -88,7 +88,7 @@ letting old PCM cross an ownership boundary.
 
 ## Quick start
 
-> **The backend 0.22.2 firmware binding is finalized to exact firmware 0.20.0.**
+> **The backend 0.22.3 firmware binding is finalized to exact firmware 0.20.0.**
 > Update and verify firmware first, then install only the protected published
 > backend image. Until that image and GitHub release exist, keep using released
 > backend 0.21.1; firmware 0.20.0 then keeps ordinary wakes available while
@@ -100,7 +100,7 @@ letting old PCM cross an ownership boundary.
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime` → install
    **True Family Voice Realtime** and set your OpenAI API key.
 2. **Give it your home**: add Home Assistant's **MCP Server** integration, expose the entities you want voice-controlled to Assist, and populate `mcp_tool_allowlist` with every exact desired tool name. Empty exposes no MCP tools.
-3. **Flash the firmware**: before backend 0.22.2, adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.20.0 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.0/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
+3. **Flash the firmware**: before backend 0.22.3, adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.20.0 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.0/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
 4. **Before startup**, set `nearby_media_power_entity` to `switch.living_room_tv_smart_switch` and `nearby_media_players` to `media_player.living_room_tv,media_player.living_room_tv_audio` for this home.
 5. **Start the protected published backend only after the firmware update succeeds**, then say
    **"Hey Leonard"** and ask for a light.

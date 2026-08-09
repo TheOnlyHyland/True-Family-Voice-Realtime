@@ -2,6 +2,14 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.3
+
+- Made the model contract explicit that every question expecting an immediate
+  answer requires a preceding tool-only `request_follow_up` response, including
+  the first question in a user-requested multi-question sequence. Each genuine
+  answer may lead to one new tool-only reservation and one short question. The
+  firmware protocol, microphone authority, and media guard are unchanged.
+
 ## 0.22.2
 
 - Preserved the prior OPEN follow-up transaction's phase token until its exact
