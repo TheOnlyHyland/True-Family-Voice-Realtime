@@ -6,6 +6,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 
 class _FrameProcessor:
@@ -103,6 +104,119 @@ class PhaseEmitterTests(unittest.IsolatedAsyncioTestCase):
         await emitter.force_idle("recovery", force_delivery=True)
 
         self.assertEqual(phases, ["idle"])
+
+    async def test_rejected_phase_does_not_advance_internal_state(self):
+        async def reject_phase(_value, _context):
+            return False
+
+        emitter = PhaseEmitter(
+            reject_phase,
+            capture_phase_context=object,
+        )
+        emitter._current = "listening"
+
+        await emitter._emit("thinking")
+
+        self.assertEqual(emitter._current, "listening")
+
+    async def test_queued_phase_uses_context_captured_before_transition_lock(self):
+        wake_generation = {"value": 1}
+        captures = []
+        attempts = []
+
+        def capture_context():
+            context = types.SimpleNamespace(
+                websocket=object(),
+                session_nonce=10,
+                wake_generation=wake_generation["value"],
+            )
+            captures.append(context)
+            return context
+
+        async def send_phase(value, context):
+            attempts.append((value, context.wake_generation))
+            return context.wake_generation == wake_generation["value"]
+
+        emitter = PhaseEmitter(
+            send_phase,
+            capture_phase_context=capture_context,
+        )
+        await emitter._phase_transition_lock.acquire()
+        queued = asyncio.create_task(emitter._emit("listening"))
+        await asyncio.sleep(0)
+        wake_generation["value"] = 2
+        emitter._phase_transition_lock.release()
+        await queued
+
+        self.assertEqual([context.wake_generation for context in captures], [1])
+        self.assertEqual(attempts, [("listening", 1)])
+        self.assertIsNone(emitter._current)
+
+    async def test_missing_scheduled_context_cannot_be_recaptured_later(self):
+        send_phase = AsyncMock(return_value=True)
+        emitter = PhaseEmitter(
+            send_phase,
+            capture_phase_context=lambda: None,
+        )
+
+        await emitter._emit("listening")
+
+        send_phase.assert_not_awaited()
+        self.assertIsNone(emitter._current)
+
+    async def test_slow_tool_thinking_preserves_current_output_owner(self):
+        progress_context = object()
+        terminal_context = object()
+        sent = []
+
+        async def send_phase(value, context, preserve_output=False):
+            sent.append((value, context, preserve_output))
+            return True
+
+        emitter = PhaseEmitter(
+            send_phase,
+            idle_debounce_s=0.001,
+            capture_phase_context=lambda: progress_context,
+            capture_terminal_idle_context=lambda: terminal_context,
+        )
+        original_in_flight = phase_emitter.TURN_LIVENESS.in_flight
+        phase_emitter.TURN_LIVENESS.in_flight = 1
+        try:
+            await emitter.process_frame(
+                phase_emitter.BotStoppedSpeakingFrame(),
+                None,
+            )
+            await asyncio.sleep(0.02)
+        finally:
+            phase_emitter.TURN_LIVENESS.in_flight = original_in_flight
+            emitter._cancel_watchdog()
+
+        self.assertEqual(sent, [("thinking", progress_context, True)])
+
+    async def test_terminal_idle_uses_distinct_tokenless_context(self):
+        progress_context = object()
+        terminal_context = object()
+        sent = []
+
+        async def send_phase(value, context):
+            sent.append((value, context))
+            return True
+
+        emitter = PhaseEmitter(
+            send_phase,
+            idle_debounce_s=0.001,
+            before_idle=AsyncMock(return_value=True),
+            capture_phase_context=lambda: progress_context,
+            capture_terminal_idle_context=lambda: terminal_context,
+        )
+
+        await emitter.process_frame(
+            phase_emitter.BotStoppedSpeakingFrame(),
+            None,
+        )
+        await asyncio.sleep(0.02)
+
+        self.assertEqual(sent, [("idle", terminal_context)])
 
     async def test_stale_reply_context_suppresses_old_idle_emission(self):
         phases = []

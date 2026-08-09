@@ -59,6 +59,10 @@ class ConversationWindow:
             None,
         )
 
+    def has_user_turn(self, user_item_id: str) -> bool:
+        """Return whether this server user item is already known history."""
+        return self._turn(user_item_id) is not None
+
     def begin_user_turn(self, item: dict[str, Any]) -> ConversationTurn:
         item_id = item["id"]
         existing = self._turn(item_id)
@@ -178,6 +182,49 @@ class ConversationWindow:
             self.active_turn_id = None
             return True
         return False
+
+    def finish_silent_control(self, call_id: str, function_name: str) -> bool:
+        """Finish a turn whose terminal model decision is a silent control."""
+        if not self.active_turn_id or not call_id or not function_name:
+            return False
+        turn = self._turn(self.active_turn_id)
+        if not turn:
+            return False
+        calls = [
+            item.get("call_id")
+            for item in turn.items
+            if item.get("type") == "function_call"
+        ]
+        results = [
+            item.get("call_id")
+            for item in turn.items
+            if item.get("type") == "function_call_output"
+        ]
+        matching_call = any(
+            item.get("type") == "function_call"
+            and item.get("call_id") == call_id
+            and item.get("name") == function_name
+            for item in turn.items
+        )
+        assistant_output_present = any(
+            item.get("type") == "message"
+            and item.get("role") == "assistant"
+            and bool(_text_content(item))
+            for item in turn.items
+        )
+        if (
+            not matching_call
+            or assistant_output_present
+            or calls != [call_id]
+            or results != [call_id]
+        ):
+            return False
+        turn.complete = True
+        # A silent control is itself the terminal assistant decision; no
+        # synthetic assistant speech is added to replayable context.
+        turn.terminal_assistant = True
+        self.active_turn_id = None
+        return True
 
     def turns_to_prune(self) -> list[ConversationTurn]:
         if self.max_turns == 0:

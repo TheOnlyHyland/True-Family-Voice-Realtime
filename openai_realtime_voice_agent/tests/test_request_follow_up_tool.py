@@ -1,4 +1,4 @@
-"""Offline tests for explicit one-shot Voice PE follow-up requests."""
+"""Offline tests for serial model-directed Voice PE follow-up requests."""
 
 import sys
 import unittest
@@ -36,10 +36,10 @@ class RequestFollowUpToolTests(unittest.IsolatedAsyncioTestCase):
                 "properties": {
                     "purpose": {
                         "type": "string",
-                        "enum": ["necessary_clarification"],
+                        "enum": ["conversational_turn"],
                         "description": (
-                            "Use only when one answer is required to complete the "
-                            "current request safely or sensibly."
+                            "Use when exactly one more user answer would make the active "
+                            "conversation more useful."
                         ),
                     }
                 },
@@ -49,11 +49,10 @@ class RequestFollowUpToolTests(unittest.IsolatedAsyncioTestCase):
         )
         description = definition["description"]
         self.assertIn("sole tool immediately before", description)
-        self.assertIn("exactly one short, necessary question", description)
-        self.assertIn("cannot be completed safely or sensibly", description)
-        self.assertIn("ordinary answer", description)
-        self.assertIn("anything else?", description)
-        self.assertIn("When uncertain, do not call", description)
+        self.assertIn("exactly one short question", description)
+        self.assertIn("another user turn would be useful", description)
+        self.assertIn("called again after each genuine answer", description)
+        self.assertIn("never ask more than one question", description)
 
     async def test_handler_reserves_before_instructing_one_short_question(self):
         events = []
@@ -87,7 +86,7 @@ class RequestFollowUpToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[1], ("activated", "follow-up-call"))
         result = events[2]
         self.assertEqual(result["status"], "follow_up_reserved")
-        self.assertIn("exactly one short, necessary question", result["instruction"])
+        self.assertIn("exactly one short question", result["instruction"])
         self.assertIn("Do not mention this tool", result["instruction"])
         self.assertIn("microphone", result["instruction"])
         self.assertIn("timeout", result["instruction"])
@@ -134,7 +133,7 @@ class RequestFollowUpToolTests(unittest.IsolatedAsyncioTestCase):
         result = cast(Any, callback.await_args).args[0]
         self.assertEqual(result["status"], "follow_up_requires_wake")
         self.assertIn("conversation context", result["instruction"])
-        self.assertIn("exactly one short, necessary question", result["instruction"])
+        self.assertIn("exactly one short question", result["instruction"])
         self.assertIn("Do not mention", result["instruction"])
 
     async def test_extra_arguments_are_rejected_without_reserving(self):
@@ -163,7 +162,7 @@ class RequestFollowUpToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "invalid_arguments")
         self.assertIn("without asking a question", result["instruction"])
 
-    async def test_non_necessary_purpose_is_rejected_without_reserving(self):
+    async def test_unknown_purpose_is_rejected_without_reserving(self):
         reserve_follow_up = AsyncMock()
         callback = AsyncMock()
         handler = create_request_follow_up_tool_handler(

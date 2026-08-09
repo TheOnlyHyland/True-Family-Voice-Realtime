@@ -219,6 +219,150 @@ class ConversationWindowTests(unittest.TestCase):
         self.assertIsNone(window.active_turn_id)
         self.assertFalse(window.turns[0].replayable)
 
+    def test_silent_control_is_terminal_without_synthetic_assistant_speech(self):
+        window = ConversationWindow(max_turns=12)
+        window.begin_user_turn(message("user-1", "user"))
+        window.attach_transcript("user-1", "purple elephant")
+        window.activate("user-1")
+        window.observe_item(
+            {
+                "id": "call-item",
+                "type": "function_call",
+                "call_id": "close-call",
+                "name": "end_conversation",
+                "arguments": "{}",
+            }
+        )
+        window.observe_item(
+            {
+                "id": "result-item",
+                "type": "function_call_output",
+                "call_id": "close-call",
+                "output": '{"status":"closed_silently"}',
+            }
+        )
+
+        self.assertTrue(
+            window.finish_silent_control("close-call", "end_conversation")
+        )
+        self.assertIsNone(window.active_turn_id)
+        self.assertTrue(window.replay_snapshot()[0].replayable)
+        self.assertEqual(
+            [entry["role"] for entry in window.context_messages()],
+            ["user", "assistant", "tool"],
+        )
+
+    def test_silent_control_rejects_wrong_or_unresolved_call(self):
+        window = ConversationWindow(max_turns=12)
+        window.begin_user_turn(message("user-1", "user"))
+        window.attach_transcript("user-1", "unrelated")
+        window.activate("user-1")
+        window.observe_item(
+            {
+                "id": "call-item",
+                "type": "function_call",
+                "call_id": "close-call",
+                "name": "end_conversation",
+                "arguments": "{}",
+            }
+        )
+
+        self.assertFalse(
+            window.finish_silent_control("close-call", "other_control")
+        )
+        self.assertFalse(
+            window.finish_silent_control("close-call", "end_conversation")
+        )
+        self.assertEqual(window.active_turn_id, "user-1")
+
+    def test_silent_control_rejects_even_resolved_mixed_tool_ledger(self):
+        window = ConversationWindow(max_turns=12)
+        window.begin_user_turn(message("user-1", "user"))
+        window.attach_transcript("user-1", "unrelated")
+        window.activate("user-1")
+        for call_id, name in (
+            ("close-call", "end_conversation"),
+            ("other-call", "other_tool"),
+        ):
+            window.observe_item(
+                {
+                    "id": f"{call_id}-item",
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": "{}",
+                }
+            )
+            window.observe_item(
+                {
+                    "id": f"{call_id}-result",
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": '{"ok":true}',
+                }
+            )
+
+        self.assertFalse(
+            window.finish_silent_control("close-call", "end_conversation")
+        )
+
+    def test_silent_control_rejects_duplicate_result_for_the_same_call(self):
+        window = ConversationWindow(max_turns=2)
+        window.begin_user_turn(message("user-1", "user"))
+        window.attach_transcript("user-1", "unrelated")
+        window.activate("user-1")
+        window.observe_item(
+            {
+                "id": "close-item",
+                "type": "function_call",
+                "call_id": "close-call",
+                "name": "end_conversation",
+                "arguments": "{}",
+            }
+        )
+        for item_id in ("result-1", "result-2"):
+            window.observe_item(
+                {
+                    "id": item_id,
+                    "type": "function_call_output",
+                    "call_id": "close-call",
+                    "output": '{"status":"closed_silently"}',
+                }
+            )
+
+        self.assertFalse(
+            window.finish_silent_control("close-call", "end_conversation")
+        )
+        self.assertEqual(window.active_turn_id, "user-1")
+
+    def test_silent_control_rejects_persisted_assistant_text(self):
+        window = ConversationWindow(max_turns=2)
+        window.begin_user_turn(message("user-1", "user"))
+        window.attach_transcript("user-1", "unrelated")
+        window.activate("user-1")
+        window.observe_item(
+            {
+                "id": "close-item",
+                "type": "function_call",
+                "call_id": "close-call",
+                "name": "end_conversation",
+                "arguments": "{}",
+            }
+        )
+        window.observe_item(message("assistant-1", "assistant", "not silent"))
+        window.observe_item(
+            {
+                "id": "result-1",
+                "type": "function_call_output",
+                "call_id": "close-call",
+                "output": '{"status":"closed_silently"}',
+            }
+        )
+
+        self.assertFalse(
+            window.finish_silent_control("close-call", "end_conversation")
+        )
+
     def test_tool_result_stays_with_calling_turn_after_next_user_arrives(self):
         window = ConversationWindow(max_turns=12)
         window.begin_user_turn(message("user-1", "user"))

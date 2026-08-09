@@ -20,10 +20,11 @@ complete option reference, agent integration, and FAQ:
 <https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/tree/main/docs>.
 This page covers setup and day-to-day essentials.
 
-> **Mandatory 0.21 compatibility order:** install and verify Voice PE firmware
-> 0.19.0 or newer before starting backend 0.21.0. For upgrades, firmware first
-> and backend second. For rollback, backend first and firmware second. Reversing
-> either order is unsupported.
+> **The backend 0.22.0 firmware binding is finalized to exact firmware 0.20.0.**
+> Update and verify firmware first, then install only the protected published
+> backend image. Until that image and GitHub release exist, continue using
+> released backend 0.21.1. A source checkout is not deployable. Rollback remains
+> backend first and firmware second.
 
 ---
 
@@ -34,8 +35,9 @@ This page covers setup and day-to-day essentials.
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
 3. Find **True Family Voice Realtime** in the store and click **Install**.
    Home Assistant pulls the CI-verified image for this exact add-on version.
-4. Open the add-on's **Configuration** tab to set it up, but do not start 0.21.0
-   until compatible firmware is installed.
+4. Open the add-on's **Configuration** tab to set it up. For 0.22.0, update exact
+   firmware 0.20.0 first and install only the protected published backend image,
+   never a source checkout.
 
 **One add-on instance serves one Voice PE device.** For multiple devices, run one
 instance per device (a local-add-on copy with its own `slug`, `name` and
@@ -93,14 +95,14 @@ option has plain-language inline help.
 | `max_output_tokens` | `1200` | finite answer and cost bound |
 | `transcription_language` | *(blank)* | auto-detects for bounded context replay; set an ISO code (e.g. `nl`) to lock it |
 | `instructions` | *(English default)* | the system prompt; swap the LANGUAGE line for your language |
-| `follow_up_listen_seconds` | `0` | ordinary replies close; one necessary model-requested no-wake follow-up is allowed per physical wake |
+| `follow_up_listen_seconds` | `0` | ordinary replies close; the model may request one useful no-wake question at a time and continue again after each genuine answer, without a round-count limit inside the 120-second physical wake |
 | `mcp_tool_allowlist` | *(blank: no MCP tools)* | must contain the complete desired exact tool list before deployment |
 | `nearby_media_players` | *(blank: startup blocked)* | required exact Living Room TV and Chromecast `media_player` IDs; active, paused, missing, or uncertain state suppresses a requested open-mic window |
 | `follow_up_open_delay_ms` | `700` | echo guard before the follow-up mic opens; lower = snappier but risks ghost turns |
 | `wake_open_delay_ms` | `700` | the same echo guard right after the wake chime |
 | `vad_eagerness` | `low` | waits longest before deciding you're done talking |
 | `playback_prebuffer_ms` | `150` | raise to ~250 if you hear crackle; 0 = play immediately |
-| `max_context_messages` | `12` | complete user-led turns retained; version 0.21.0 requires a value above `0` |
+| `max_context_messages` | `12` | complete user-led turns retained; version 0.22.0 requires a value above `0` |
 | `enable_web_search` | `true` | online lookups; set `false` to disable |
 | `enable_voice_memory` | `false` | explicit opt-in for persistent memory tools and memory-file reads |
 | `web_search_model` | `gpt-5.5` | best-quality search model; mini/nano are cheaper |
@@ -112,7 +114,7 @@ option has plain-language inline help.
 
 The legacy `server_vad` turn-detection fields live at the bottom of ⚙️ Advanced and
 only appear when you enable **"Show unused optional configuration options"**.
-Leave them unset: version 0.21.0 requires managed `semantic_vad` and rejects
+Leave them unset: version 0.22.0 requires managed `semantic_vad` and rejects
 `server_vad` at startup.
 
 The **complete option reference** (every option, purpose, default, when to change
@@ -155,7 +157,7 @@ assistant can address people by name, and
 gated tool politely refuses unless the gated voice was identified. Convenience,
 not biometric security. Leave names empty to disable.
 
-**Backend enrollment is not available in 0.21.0.** The add-on exposes no model,
+**Backend enrollment is not available in 0.22.0.** The add-on exposes no model,
 device, configuration, or administrator control that can start microphone
 enrollment. The rapid pilot only consumes prints that an administrator already
 provisioned under `/share/voice-prints/`; creating new reference audio and prints

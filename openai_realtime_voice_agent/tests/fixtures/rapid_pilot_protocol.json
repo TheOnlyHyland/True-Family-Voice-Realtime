@@ -1,14 +1,16 @@
 {
-  "backend_version": "0.21.1",
+  "backend_version": "0.22.0",
   "legacy_backend_version": "0.20.6",
-  "minimum_firmware_version": "0.19.0",
-  "validated_firmware_release": {
-    "version": "0.19.0",
-    "manifest_sha256": "b9b12d87346148d5260a53d6303eb8c44ffb3cd24d6eb5c1a0017baccdc3a9d3",
-    "factory_sha256": "7f0ffaeaecb861ceb342ad571501b14c6017161bbb6d90f489002ae4271f6b14",
-    "ota_sha256": "68ab4263b407244d5cce05d7a81888604bd90dccfb38e93c8a63f4a55a070ad8",
-    "elf_sha256": "d1f77ac2f71a6491bd750f44efa5e6bacdd977edc945b6ef20d241995e843775",
-    "sha256sums_sha256": "fb4f71aebb6556ca6b6f659832943c698400f62cb9ee44bc1a10b2f5894050ce"
+  "firmware_release_binding": {
+    "status": "finalized",
+    "version": "0.20.0",
+    "repository": "TheOnlyHyland/True-Family-Voice-Firmware",
+    "source_commit": "36abf4ba861e2ca30968882311ed3b2562b47367",
+    "manifest_sha256": "09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f",
+    "factory_sha256": "8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65",
+    "ota_sha256": "a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38",
+    "elf_sha256": "9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88",
+    "sha256sums_sha256": "280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3"
   },
   "transport_security": "unauthenticated_plaintext_trusted_lan_only",
   "audio": {
@@ -28,6 +30,28 @@
     "commit_follow_up_ack",
     "microphone_open"
   ],
+  "tool_continuation_audio_sequence": [
+    "response_a_done",
+    "source_and_chunker_work_drained",
+    "final_partial_pcm_padded_at_most_once",
+    "queued_and_active_writes_drained",
+    "follow_up_finalized",
+    "response_b_created"
+  ],
+  "tool_continuation_failure_sequence": [
+    "finish_deadline_expired",
+    "response_a_generation_settled",
+    "stale_socket_detached_and_closed_or_aborted",
+    "response_a_grant_released",
+    "recovery_without_response_b"
+  ],
+  "phase_semantics": {
+    "initial_physical_values": ["listening", "thinking", "replying"],
+    "follow_up_progress_values": ["listening", "thinking", "replying"],
+    "terminal_value": "idle",
+    "terminal_token_forbidden": true,
+    "physical_wake_ceiling_ms": 120000
+  },
   "backend_to_device": [
     "hello",
     "request_follow_up",
@@ -60,6 +84,7 @@
     "commit_follow_up": ["type", "token", "session_nonce", "ready_nonce"],
     "ack": ["type", "session_nonce", "wake_generation"],
     "phase": ["type", "value", "session_nonce", "wake_generation"],
+    "follow_up_progress_phase": ["type", "value", "token", "session_nonce", "wake_generation"],
     "prepare_suppress_followup": ["type", "token"],
     "commit_suppress_followup": ["type", "token"],
     "cancel_suppress_followup": ["type", "token"]

@@ -12,11 +12,13 @@ Two places hold configuration:
 
 > The `*_custom` fields and legacy `server_vad` fields are hidden until you toggle
 > **"Show unused optional configuration options"** at the bottom of the tab.
-> Version 0.21.0 requires the default `semantic_vad`; selecting `server_vad`
+> Version 0.22.0 requires the default `semantic_vad`; selecting `server_vad`
 > blocks startup.
 
-> **Version 0.21 rollout order:** firmware 0.19.0 or newer first, backend second.
-> Rollback order is backend first, firmware second. Do not reverse these orders.
+> **Version 0.22.0 is bound to exact firmware 0.20.0.** Update and verify that
+> firmware first, then install only the protected published backend image. A
+> source checkout is not a release artifact. Rollback remains backend first and
+> firmware second.
 
 ## 🔑 Basics
 
@@ -41,7 +43,7 @@ Two places hold configuration:
 
 | Option | Default | Purpose / when to change |
 |---|---|---|
-| `follow_up_listen_seconds` | `0` | Must remain `0` in version 0.21.0. Ordinary replies close the mic and the model can request at most one no-wake window per physical wake, only for a necessary question. A saved nonzero value fails startup instead of enabling legacy automatic mode. |
+| `follow_up_listen_seconds` | `0` | Must remain `0` in version 0.22.0. Ordinary replies close the mic. The model may request one useful no-wake question at a time and, after each genuine answer, request another without a round-count limit inside the existing 120-second physical wake. A saved nonzero value fails startup instead of enabling legacy automatic mode. |
 | `follow_up_open_delay_ms` | `700` | Echo guard: pause between the end of a reply and the mic re-opening, so the speaker's tail can't become a ghost question. Lower (300–500) is snappier but risks the assistant answering its own echo — raise it back if it "answers nobody" or repeats itself. |
 | `wake_open_delay_ms` | `700` | The same echo guard after the wake chime, before the mic opens. Lower for a snappier wake; raise if a wake sometimes triggers an answer to nothing. |
 | `vad_eagerness` | `low` | How quickly it decides you're done talking. `low` waits patiently (best if you pause mid-sentence), `high` answers faster but may cut you off, `auto` lets OpenAI decide. |
@@ -85,7 +87,7 @@ Two places hold configuration:
 > authenticate a device or encrypt traffic. Run it only on a trusted, isolated
 > LAN; do not expose the WebSocket port to untrusted networks or the internet.
 
-> **Accepted inherited privileges:** 0.21.0 still uses host networking, the Home
+> **Accepted inherited privileges:** 0.22.0 still uses host networking, the Home
 > Assistant API credential, and read-write `/share`. Those process privileges are
 > not a model authorization policy. MCP authority remains limited to the exact
 > configured allow-list and the exact tool schema exposed in the current session.
@@ -96,13 +98,13 @@ Two places hold configuration:
 |---|---|---|
 | `websocket_port` | `8080` | The port the Voice PE connects to. Must match the `va_url` in the device firmware. Change only on a port clash (and for second devices — see [multi-device](getting-started.md#part-6--multiple-devices)); `8081` is used by dev builds. |
 | `session_reuse_timeout_seconds` | `300` | If the device reconnects within this window after a Wi-Fi blip, the conversation resumes. A full add-on restart starts fresh. |
-| `max_context_messages` | `12` | Complete user-led turns retained across the hourly OpenAI reconnect; tool calls and results stay together. Version 0.21.0 requires a value above `0` so a necessary clarification survives a fresh wake. |
+| `max_context_messages` | `12` | Complete user-led turns retained across the hourly OpenAI reconnect; tool calls and results stay together. Version 0.22.0 requires a value above `0` so a requested conversational turn survives a fresh wake. |
 | `transcription_model` | `gpt-4o-transcribe` | Creates private bounded text for reconnect replay. Does **not** affect understanding — the main model hears your audio natively. Also: `gpt-realtime-whisper`, `gpt-4o-mini-transcribe`, `whisper-1`. |
 | `transcription_model_custom` | *(hidden)* | Custom transcription model id. |
-| `turn_detection_type` | *(unset)* | Leave unset. The 0.21.0 rapid pilot requires managed `semantic_vad`; selecting legacy `server_vad` blocks startup. |
-| `vad_threshold` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.21.0 startup. |
-| `vad_prefix_padding_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.21.0 startup. |
-| `vad_silence_duration_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.21.0 startup. |
+| `turn_detection_type` | *(unset)* | Leave unset. The 0.22.0 rapid pilot requires managed `semantic_vad`; selecting legacy `server_vad` blocks startup. |
+| `vad_threshold` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.22.0 startup. |
+| `vad_prefix_padding_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.22.0 startup. |
+| `vad_silence_duration_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.22.0 startup. |
 
 ## 🔍 Debug
 
@@ -110,7 +112,7 @@ Two places hold configuration:
 |---|---|---|
 | `enable_recording` | `false` | Saves mic and speaker audio to files inside the add-on, for troubleshooting only. Also saves speaker-probe captures for offline threshold calibration. Leave off normally. |
 
-Backend microphone enrollment is deliberately absent from the 0.21 rapid pilot.
+Backend microphone enrollment is deliberately absent from the 0.22 rapid pilot.
 There are no enrollment options or model, device, or administrator start controls.
 
 ---

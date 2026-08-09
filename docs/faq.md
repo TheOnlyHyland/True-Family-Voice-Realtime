@@ -61,7 +61,7 @@ do it for latency, not money); each web search adds a few cents.
   pre-provisioned voice prints (`/share/voice-prints/`), opt-in debug recordings,
   and memory notes (`/share/voice-memory/`) live on your HA box and are never
   uploaded by this add-on. Speaker identification runs locally in the add-on.
-- **Backend microphone enrollment is absent in 0.21.** No model, device, or
+- **Backend microphone enrollment is absent in 0.22.** No model, device, or
   administrator control can start an enrollment recording in the rapid pilot.
 
 ### What are the secrets in the firmware config?
@@ -114,7 +114,7 @@ Three things must line up — check `sensor.voicepe_<instance>_voice_prints`:
 Also: the check needs ~3 seconds of voiced speech, so ask "who am I?" as a
 follow-up rather than the very first words after the wake.
 
-The 0.21 rapid pilot consumes existing prints but does not capture or build new
+The 0.22 rapid pilot consumes existing prints but does not capture or build new
 ones. Provisioning is an offline administrator task outside this release.
 
 ### I exposed a new entity or script to Assist but the assistant can't use it
@@ -130,12 +130,14 @@ that need one.)
 
 ### It replied to the TV / a conversation it overheard — how do I stop that?
 
-New installs use `follow_up_listen_seconds: 0`: ordinary replies close the mic,
-and only one necessary model-requested follow-up can open without another wake
-word during that physical wake. If an older install has a saved value above 0,
-the 0.21.0 add-on blocks startup until you set it to 0.
+New installs use `follow_up_listen_seconds: 0`: ordinary replies close the mic.
+The model may request one useful no-wake question at a time and, after each
+genuine answer, request another without a round-count limit inside the existing
+120-second physical wake. A random or unrelated reply ends the conversation
+silently. If an older install has a saved value above 0, the 0.22.0 add-on blocks
+startup until you set it to 0.
 
-Version 0.21.0 requires `nearby_media_players` to contain the exact Living Room TV
+Version 0.22.0 requires `nearby_media_players` to contain the exact Living Room TV
 and Living Room Chromecast `media_player` entity IDs for this deployment. The
 backend checks only that fixed list
 before preparing and again after firmware READY while the mic is still closed.

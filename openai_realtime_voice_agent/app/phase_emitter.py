@@ -64,6 +64,7 @@ import asyncio
 import logging
 import os
 import time
+from typing import Optional
 
 from pipecat.frames.frames import (
     Frame,
@@ -75,6 +76,8 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
 logger = logging.getLogger(__name__)
+
+_PHASE_CONTEXT_UNSET = object()
 
 
 class TurnLiveness:
@@ -127,11 +130,13 @@ class PhaseEmitter(FrameProcessor):
     def __init__(
         self,
         send_phase,
-        idle_debounce_s: float = None,
+        idle_debounce_s: Optional[float] = None,
         before_idle=None,
         before_forced_idle=None,
         on_bot_started=None,
         capture_idle_context=None,
+        capture_phase_context=None,
+        capture_terminal_idle_context=None,
         **kwargs,
     ):
         """
@@ -150,6 +155,8 @@ class PhaseEmitter(FrameProcessor):
         self._before_forced_idle = before_forced_idle
         self._on_bot_started = on_bot_started
         self._capture_idle_context = capture_idle_context
+        self._capture_phase_context = capture_phase_context
+        self._capture_terminal_idle_context = capture_terminal_idle_context
         if idle_debounce_s is None:
             try:
                 idle_debounce_s = float(os.environ.get("PHASE_IDLE_DEBOUNCE_MS", "1500")) / 1000.0
@@ -158,6 +165,7 @@ class PhaseEmitter(FrameProcessor):
         self._idle_debounce_s = max(0.0, idle_debounce_s)
         self._idle_task = None
         self._watchdog_task = None
+        self._phase_transition_lock = asyncio.Lock()
         self._current = None  # last phase actually sent, to dedupe redundant emits
         # Set by force_idle(): the turn was declared dead, so a VAD stop event
         # that is still in flight must NOT re-emit `thinking` and re-stick the
@@ -200,6 +208,11 @@ class PhaseEmitter(FrameProcessor):
         activity follows — see the module docstring for the race this
         prevents.
         """
+        terminal_anchor = (
+            self._capture_terminal_idle_context()
+            if self._capture_terminal_idle_context is not None
+            else _PHASE_CONTEXT_UNSET
+        )
         self._cancel_pending_idle()
         self._cancel_watchdog()
         self._suppress_thinking = True
@@ -215,17 +228,48 @@ class PhaseEmitter(FrameProcessor):
                 )
         if reason:
             logger.warning(f"📞 forcing phase idle ({reason[:90]})")
+        phase_context = terminal_anchor
+        if self._capture_terminal_idle_context is not None:
+            refreshed_context = self._capture_terminal_idle_context()
+            if (
+                terminal_anchor is None
+                or refreshed_context is None
+                or any(
+                    getattr(terminal_anchor, field, None)
+                    != getattr(refreshed_context, field, None)
+                    for field in (
+                        "websocket",
+                        "session_nonce",
+                        "wake_generation",
+                    )
+                )
+            ):
+                return
+            phase_context = refreshed_context
         if force_delivery and self._current == "idle":
-            logger.info("📞 phase -> idle (forced repeat)")
-            if self._send_phase is not None:
-                try:
-                    await self._send_phase("idle")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to emit phase 'idle': {e}")
+            async with self._phase_transition_lock:
+                logger.info("📞 phase -> idle (forced repeat)")
+                if self._send_phase is not None:
+                    try:
+                        if phase_context is _PHASE_CONTEXT_UNSET:
+                            await self._send_phase("idle")
+                        else:
+                            await self._send_phase(
+                                "idle",
+                                phase_context,
+                            )
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to emit phase 'idle': {e}")
             return
-        await self._emit("idle")
+        await self._emit("idle", phase_context=phase_context)
 
-    async def _emit(self, value: str) -> None:
+    async def _emit(
+        self,
+        value: str,
+        *,
+        phase_context=_PHASE_CONTEXT_UNSET,
+        preserve_output: bool = False,
+    ) -> None:
         # "listening" is NEVER deduped. The device lifts its post-stop incoming-
         # audio suppression ONLY on receiving a "listening" phase (firmware
         # 14bff74). A stop can RE-SET that suppression after our last "listening"
@@ -237,15 +281,41 @@ class PhaseEmitter(FrameProcessor):
         # device (re-lifts suppress, re-opens the mic gate; the barge-in cut-over
         # is a no-op because the mic is gated during a reply so a real
         # UserStartedSpeaking never coincides with queued TTS).
-        if value == self._current and value != "listening":
+        if phase_context is _PHASE_CONTEXT_UNSET:
+            capture = (
+                self._capture_terminal_idle_context
+                if value == "idle"
+                else self._capture_phase_context
+            )
+            if capture is not None:
+                phase_context = capture()
+        if phase_context is None:
             return
-        self._current = value
-        logger.info(f"📞 phase -> {value}")  # TEMP instrumentation
-        if self._send_phase is not None:
-            try:
-                await self._send_phase(value)
-            except Exception as e:  # never let UI signalling break the audio path
-                logger.warning(f"⚠️ Failed to emit phase '{value}': {e}")
+        async with self._phase_transition_lock:
+            if value == self._current and value != "listening":
+                return
+            if self._send_phase is not None:
+                try:
+                    if phase_context is _PHASE_CONTEXT_UNSET:
+                        sent = await self._send_phase(value)
+                    elif preserve_output:
+                        sent = await self._send_phase(
+                            value,
+                            phase_context,
+                            True,
+                        )
+                    else:
+                        sent = await self._send_phase(
+                            value,
+                            phase_context,
+                        )
+                    if sent is False:
+                        return
+                except Exception as e:  # never let UI signalling break the audio path
+                    logger.warning(f"⚠️ Failed to emit phase '{value}': {e}")
+                    return
+            self._current = value
+            logger.info(f"📞 phase -> {value}")  # TEMP instrumentation
 
     def _cancel_pending_idle(self) -> None:
         if self._idle_task is not None and not self._idle_task.done():
@@ -266,7 +336,12 @@ class PhaseEmitter(FrameProcessor):
         self._cancel_watchdog()
         self._watchdog_task = asyncio.create_task(self._thinking_watchdog())
 
-    async def _emit_idle_after_debounce(self, finalizer_context=None) -> None:
+    async def _emit_idle_after_debounce(
+        self,
+        finalizer_context=None,
+        phase_context=_PHASE_CONTEXT_UNSET,
+        terminal_idle_context=_PHASE_CONTEXT_UNSET,
+    ) -> None:
         try:
             await asyncio.sleep(self._idle_debounce_s)
         except asyncio.CancelledError:
@@ -281,7 +356,11 @@ class PhaseEmitter(FrameProcessor):
         # phase to `replying`. Fast tools never reach here — their result reply
         # cancels this debounce first.
         if TURN_LIVENESS.in_flight > 0:
-            await self._emit("thinking")
+            await self._emit(
+                "thinking",
+                phase_context=phase_context,
+                preserve_output=True,
+            )
             self._arm_watchdog()
             return
         if self._before_idle is not None:
@@ -296,7 +375,7 @@ class PhaseEmitter(FrameProcessor):
                 return
             except Exception as error:
                 logger.warning("⚠️ conversation control before idle failed: %r", error)
-        await self._emit("idle")
+        await self._emit("idle", phase_context=terminal_idle_context)
 
     async def _thinking_watchdog(self) -> None:
         """Force idle when `thinking` sits with no model activity (dead turn)."""
@@ -391,8 +470,22 @@ class PhaseEmitter(FrameProcessor):
                 if self._capture_idle_context is not None
                 else None
             )
+            phase_context = (
+                self._capture_phase_context()
+                if self._capture_phase_context is not None
+                else _PHASE_CONTEXT_UNSET
+            )
+            terminal_idle_context = (
+                self._capture_terminal_idle_context()
+                if self._capture_terminal_idle_context is not None
+                else _PHASE_CONTEXT_UNSET
+            )
             self._idle_task = asyncio.create_task(
-                self._emit_idle_after_debounce(finalizer_context)
+                self._emit_idle_after_debounce(
+                    finalizer_context,
+                    phase_context,
+                    terminal_idle_context,
+                )
             )
 
         await self.push_frame(frame, direction)

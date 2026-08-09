@@ -22,7 +22,7 @@ On-device wake word, local voice recognition. It can greet you by name, keep per
 After an administrator enables the persistent-memory privacy option, teach it standing rules by voice. They persist, attributed to whoever said them, and only identified household voices can change them. "Forget that" removes them; "what do you remember?" reads them back.
 
 **And it just converses.**
-Speech in, speech out — no STT→LLM→TTS chain, so tone and timing feel human. Interrupt it mid-sentence with "stop". Ordinary replies close the mic; when one necessary question really is required, the model can request one no-wake follow-up for that physical wake. Lights, climate, media, and shopping lists respond in under a second.
+Speech in, speech out — no STT→LLM→TTS chain, so tone and timing feel human. Interrupt it mid-sentence with "stop". Ordinary replies close the mic; when another turn would be useful, the model can request one no-wake question at a time and continue again after each genuine answer within the same 120-second physical wake. Lights, climate, media, and shopping lists respond in under a second.
 
 ## What people do with it
 
@@ -44,7 +44,7 @@ Longer versions, with the how-it-works behind each: **[Stories](docs/stories.md)
 - **OpenAI Realtime speech-to-speech** — `gpt-realtime-2.1` by default, any model id via custom
 - **Native Home Assistant control** via the official MCP Server integration — scoped to exactly the entities you expose
 - **Custom wake word** — "Hey Leonard" ships as the default (trained by this project); switch to Hey Jarvis / Okay Nabu from a dropdown in HA, or [train your own](docs/features.md#wake-words)
-- **Speaker recognition** — local voice-type and pre-provisioned voice-print identification; backend enrollment is not part of the 0.21 rapid pilot
+- **Speaker recognition** — local voice-type and pre-provisioned voice-print identification; backend enrollment is not part of the 0.22 rapid pilot
 - **Voice-instructed memory** — explicit opt-in, default off; "remember…" / "forget…" / "what do you remember?", speaker-gated writes
 - **[OpenClaw](https://openclaw.ai) integration** — sub-second `recall_memory` from your agent's memory, deep questions escalated to a full agent turn; a [ready-to-run bridge](examples/openclaw-bridge/) ships in this repo ([contracts are agent-agnostic](docs/agent-integration.md))
 - **Long-running task delegation** — OpenClaw reports back by voice, in the room that asked, via the announce endpoint
@@ -53,7 +53,8 @@ Longer versions, with the how-it-works behind each: **[Stories](docs/stories.md)
 - **Web search** — current info via a single extra OpenAI call (on by default)
 - **Read-only calendar lookups** — bounded event reads from approved Home Assistant calendars; no event writes
 - **Authoritative room-light ON control** — fixed per-room sequences keep mixed Zigbee groups coherent
-- **Safe selective follow-ups** — one model-requested no-wake clarification per physical wake, with a required fail-closed nearby-media scope
+- **Safe serial follow-ups** — one model-requested question at a time, rearmed only after each genuine answer, with no round-count limit inside the existing 120-second physical wake and a required fail-closed nearby-media scope
+- **Unclipped tool continuations** — response-generation audio drains through Pipecat and the physical WebSocket before a tool follow-up response can begin
 - **HA sensors** — current speaker, active timers, wakes today, false wakes today, and available voice prints
 - **Persona fully yours** — rewrite the instructions; ten OpenAI voices to build on
 - **Production hardening** — proactive session refresh before OpenAI's 60-minute cap, reconnect recovery, echo/ghost-turn guards, stop-word authority, turn-liveness watchdogs
@@ -79,20 +80,28 @@ Three parts:
 2. **Backend add-on** (this repo) — owns the OpenAI Realtime session, Home Assistant tools, speaker identity, timers, and memory.
 3. **[OpenClaw](https://openclaw.ai) integration** (optional) — deep recall, messaging, calls, and long-running task delegation ([agent-agnostic contracts](docs/agent-integration.md)). Everything else works without it.
 
+For a tool continuation, the backend owns the wire order: OpenAI response A
+finishes, every generation-bound source/chunker/queued/partial/active-write byte
+drains, the follow-up decision finalizes, and only then may response B be created.
+Stop, replacement, recovery, timeout, or write failure discards A instead of
+letting old PCM cross an ownership boundary.
+
 ## Quick start
 
-> **0.21 compatibility order is mandatory:** update/flash firmware 0.19.0 or
-> newer **before** starting backend 0.21.0. For rollback, roll the backend back
-> first and firmware second. See [Release Safety](RELEASE.md).
+> **The backend 0.22.0 firmware binding is finalized to exact firmware 0.20.0.**
+> Update and verify firmware first, then install only the protected published
+> backend image. Until that image and GitHub release exist, keep using released
+> backend 0.21.1. A source checkout is not deployable. See
+> [Release Safety](RELEASE.md) for the immutable source and artifact binding.
 
-1. **Install but do not start the add-on yet**: Settings → Add-ons → Add-on Store
+1. **Install the current published version, but do not start the add-on yet**: Settings → Add-ons → Add-on Store
    → ⋮ → Repositories → add
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime` → install
    **True Family Voice Realtime** and set your OpenAI API key.
 2. **Give it your home**: add Home Assistant's **MCP Server** integration, expose the entities you want voice-controlled to Assist, and populate `mcp_tool_allowlist` with every exact desired tool name. Empty exposes no MCP tools.
-3. **Flash the firmware**: adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.19.0 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
+3. **Flash the firmware**: before backend 0.22.0, adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.20.0 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.0/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
 4. **Before startup**, set `nearby_media_players` to the exact Living Room TV and Living Room Chromecast entity IDs for this deployment.
-5. **Start backend 0.21.0 only after the firmware update succeeds**, then say
+5. **Start the protected published backend only after the firmware update succeeds**, then say
    **"Hey Leonard"** and ask for a light.
 
 Full walkthrough (~30–45 minutes from zero): **[Getting Started](docs/getting-started.md)**.

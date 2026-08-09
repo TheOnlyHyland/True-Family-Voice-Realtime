@@ -1,6 +1,7 @@
 """Offline lifecycle tests for the single-device voice pipeline."""
 
 import asyncio
+import base64
 import json
 import sys
 import types
@@ -51,6 +52,25 @@ class _Frame:
     pass
 
 
+class _TTSAudioRawFrame(_Frame):
+    _next_id = 0
+
+    def __init__(self, audio=b"", sample_rate=24000, num_channels=1):
+        type(self)._next_id += 1
+        self.id = type(self)._next_id
+        self.audio = audio
+        self.sample_rate = sample_rate
+        self.num_channels = num_channels
+
+
+class _CurrentAudioResponse:
+    def __init__(self, item_id, content_index, start_time_ms):
+        self.item_id = item_id
+        self.content_index = content_index
+        self.start_time_ms = start_time_ms
+        self.total_size = 0
+
+
 class _FrameDirection:
     DOWNSTREAM = object()
     UPSTREAM = object()
@@ -96,6 +116,17 @@ class _OpenAIRealtimeLLMService:
     async def _handle_evt_response_done(self, _evt):
         pass
 
+    async def _handle_evt_text_delta(self, evt):
+        if evt.delta:
+            await self.push_frame(("text", evt.delta))
+
+    async def _handle_evt_audio_transcript_delta(self, evt):
+        if evt.delta:
+            await self.push_frame(("audio_transcript", evt.delta))
+
+    async def _handle_evt_audio_done(self, _evt):
+        pass
+
     async def _handle_evt_conversation_item_added(self, _evt):
         pass
 
@@ -106,6 +137,9 @@ class _OpenAIRealtimeLLMService:
         pass
 
     async def _handle_evt_speech_stopped(self, _evt):
+        pass
+
+    async def _handle_evt_speech_started(self, _evt):
         pass
 
     async def _handle_evt_function_call_arguments_done(self, _evt):
@@ -173,6 +207,7 @@ _stub_module(
 _stub_module(
     "pipecat.services.openai.realtime.llm",
     OpenAIRealtimeLLMService=_OpenAIRealtimeLLMService,
+    CurrentAudioResponse=_CurrentAudioResponse,
 )
 _stub_module(
     "pipecat.processors.frame_processor",
@@ -190,6 +225,9 @@ _stub_module(
     FunctionCallResultFrame=type("FunctionCallResultFrame", (_Frame,), {}),
     LLMFullResponseStartFrame=type("LLMFullResponseStartFrame", (_Frame,), {}),
     LLMFullResponseEndFrame=type("LLMFullResponseEndFrame", (_Frame,), {}),
+    TTSAudioRawFrame=_TTSAudioRawFrame,
+    TTSStartedFrame=type("TTSStartedFrame", (_Frame,), {}),
+    TTSStoppedFrame=type("TTSStoppedFrame", (_Frame,), {}),
 )
 _stub_module("pipecat.audio.utils", create_stream_resampler=lambda: _Placeholder())
 _stub_module("pipecat.services.openai.realtime.events")
@@ -462,6 +500,60 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             [self._message(f"assistant-{number}", "assistant", f"reply {number}")],
         )
 
+    def _prepare_decision_service(self):
+        service = main.SafeRealtimeLLMService(
+            max_context_turns=12,
+            authorized_tool_names=(main.END_CONVERSATION_TOOL_NAME,),
+        )
+        service._context = _LLMContext()
+        service._current_audio_response = None
+        service.stop_ttfb_metrics = AsyncMock()
+        pushed = []
+        service.push_frame = AsyncMock(side_effect=lambda frame, *_args: pushed.append(frame))
+        service._assistant_output_frame_created = Mock(return_value=True)
+        service.set_silent_close_runtime_authorizer(lambda: True)
+        service._conversation_window.begin_user_turn(
+            self._message("answer-user", "user")
+        )
+        service._conversation_window.attach_transcript(
+            "answer-user",
+            "unrelated answer",
+        )
+        service._conversation_window.activate("answer-user")
+        service._confirmed_follow_up_answer_identity = ("answer-user", 4)
+        service._active_response_id = "decision-response"
+        service._output_response_generation = 1
+        service._active_output_response_context = ("decision-response", 1)
+        service._begin_decision_output_hold("decision-response", 1)
+        return service, pushed
+
+    @staticmethod
+    def _audio_delta(response_id="decision-response", audio=b"held-audio"):
+        return types.SimpleNamespace(
+            response_id=response_id,
+            item_id="assistant-audio",
+            content_index=0,
+            delta=base64.b64encode(audio).decode("ascii"),
+        )
+
+    @staticmethod
+    def _response_done(output, status="completed"):
+        return types.SimpleNamespace(
+            response=types.SimpleNamespace(
+                id="decision-response",
+                status=status,
+                output=output,
+            )
+        )
+
+    @staticmethod
+    def _text_delta(event_type, text):
+        return types.SimpleNamespace(
+            response_id="decision-response",
+            delta=text,
+            type=event_type,
+        )
+
     @staticmethod
     def _graceful_ack(handler, payload, stage, accepted):
         return {
@@ -480,18 +572,28 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         *,
         accepted=True,
     ):
-        while websocket.send.await_count == 0:
-            await asyncio.sleep(0)
-        payload = json.loads(websocket.send.await_args_list[-1].args[0])
+        reservation = cast(Any, handler._request_follow_up_reservation)
+        payload = None
+        while payload is None:
+            for call in reversed(websocket.send.await_args_list):
+                candidate = json.loads(call.args[0])
+                if (
+                    candidate.get("type") == "request_follow_up"
+                    and candidate.get("token") == reservation.token
+                ):
+                    payload = candidate
+                    break
+            if payload is None:
+                await asyncio.sleep(0)
         handler._handle_request_follow_up_ack(
             {
                 "type": "request_follow_up_ack",
-                "token": payload["token"],
-                "session_nonce": payload["session_nonce"],
+                "token": cast(dict, payload)["token"],
+                "session_nonce": cast(dict, payload)["session_nonce"],
                 "accepted": accepted,
             }
         )
-        return payload
+        return cast(dict, payload)
 
     async def _ack_cancel_requested_follow_up(
         self,
@@ -525,7 +627,7 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         accepted=True,
     ):
         reservation = cast(Any, handler._request_follow_up_reservation)
-        ready_nonce = 987654321
+        ready_nonce = 987654321 - len(handler._seen_ready_nonces)
         while ready_nonce in {reservation.token, reservation.session_nonce}:
             ready_nonce -= 1
         await handler._handle_device_control_message(
@@ -539,9 +641,12 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         commit = None
         for _ in range(1000):
-            for call in websocket.send.await_args_list:
+            for call in reversed(websocket.send.await_args_list):
                 candidate = json.loads(call.args[0])
-                if candidate.get("type") == "commit_follow_up":
+                if (
+                    candidate.get("type") == "commit_follow_up"
+                    and candidate.get("token") == reservation.token
+                ):
                     commit = candidate
                     break
             if commit is not None:
@@ -570,6 +675,33 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             websocket,
         )
         return request, commit
+
+    async def _open_and_confirm_answer(
+        self,
+        handler,
+        websocket,
+        tool_call_id="request-call",
+    ):
+        self.assertEqual(
+            await self._reserve(handler, tool_call_id),
+            websocket_handler.FollowUpReservationOutcome.RESERVED,
+        )
+        self._activate(handler, tool_call_id)
+        self._qualify_response(
+            handler,
+            f"{tool_call_id}-response",
+            tool_call_id,
+        )
+        await self._open_requested_follow_up(handler, websocket)
+        handler.note_request_follow_up_turn_boundary()
+        self.assertTrue(handler.bind_request_follow_up_answer("answer-item", 1))
+        self.assertTrue(
+            handler.confirm_request_follow_up_answer(
+                "answer-item",
+                1,
+                "relevant answer",
+            )
+        )
 
     async def test_bounded_turn_deletes_old_items_before_response_create(self):
         service = main.SafeRealtimeLLMService(
@@ -796,6 +928,114 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             response_event.type,
             "response.create",
         )
+
+    async def test_tool_continuation_drains_response_a_before_follow_up_and_response_b(self):
+        service = main.SafeRealtimeLLMService(max_context_turns=12)
+        service._api_session_ready = True
+        service._continuation_result_call_ids.add("call-1")
+        service._tool_call_output_contexts["call-1"] = ("response-a", 4)
+        order = []
+
+        async def drain(response_id, response_generation):
+            self.assertEqual((response_id, response_generation), ("response-a", 4))
+            order.append("drain-a")
+            return True
+
+        def arm(call_ids):
+            self.assertEqual(call_ids, {"call-1"})
+            order.append("arm-follow-up")
+            return True
+
+        async def send(event):
+            self.assertEqual(event.type, "response.create")
+            order.append("create-b")
+
+        service.set_assistant_output_event_handlers(
+            on_before_tool_continuation=drain,
+        )
+        service.set_request_follow_up_event_handlers(
+            on_continuation_arm=arm,
+        )
+        service.send_client_event = send
+
+        await service._run_tool_continuation(service._session_generation)
+
+        self.assertEqual(order, ["drain-a", "arm-follow-up", "create-b"])
+        self.assertNotIn("call-1", service._tool_call_output_contexts)
+
+    async def test_failed_audio_drain_never_creates_response_b_or_reexecutes_tool(self):
+        service = main.SafeRealtimeLLMService(max_context_turns=12)
+        executions = 0
+
+        async def tool_handler(params):
+            nonlocal executions
+            executions += 1
+            await params.result_callback({"status": "done"})
+
+        service.register_function("one_shot_tool", tool_handler)
+        _, wrapped_handler = service._registered_function
+        params = types.SimpleNamespace(
+            tool_call_id="call-once",
+            arguments={},
+            result_callback=AsyncMock(),
+        )
+        service._tool_call_generations[params.tool_call_id] = 0
+        await wrapped_handler(params)
+        self.assertEqual(executions, 1)
+
+        service._pending_tool_result_ids.clear()
+        service._pending_tool_results_drained.set()
+        service._continuation_result_call_ids.add(params.tool_call_id)
+        service._tool_call_output_contexts[params.tool_call_id] = (
+            "response-a",
+            4,
+        )
+        service._api_session_ready = True
+        service.send_client_event = AsyncMock()
+        service.push_error = AsyncMock()
+        service.set_assistant_output_event_handlers(
+            on_before_tool_continuation=AsyncMock(return_value=False),
+        )
+
+        await service._run_tool_continuation(service._session_generation)
+
+        self.assertEqual(executions, 1)
+        service.send_client_event.assert_not_awaited()
+        service.push_error.assert_awaited_once()
+        self.assertTrue(service._recovery_active)
+
+    async def test_ordinary_non_tool_response_never_runs_audio_drain_barrier(self):
+        service = main.SafeRealtimeLLMService(max_context_turns=12)
+        drain = AsyncMock(return_value=True)
+        service.set_assistant_output_event_handlers(
+            on_before_tool_continuation=drain,
+        )
+        service._active_response_id = "ordinary-response"
+        service._active_output_response_context = ("ordinary-response", 2)
+        service._response_interrupt_generations["ordinary-response"] = None
+        service.push_frame = AsyncMock()
+
+        await service._handle_evt_response_done(
+            types.SimpleNamespace(
+                response=types.SimpleNamespace(
+                    id="ordinary-response",
+                    status="completed",
+                    output=[
+                        types.SimpleNamespace(
+                            model_dump=lambda exclude_none: self._message(
+                                "assistant-ordinary",
+                                "assistant",
+                                "done",
+                            )
+                        )
+                    ],
+                    usage=types.SimpleNamespace(),
+                )
+            )
+        )
+
+        drain.assert_not_awaited()
+        self.assertIsNone(service._continuation_task)
 
     async def test_tool_continuation_waits_for_overlap_deletion_barrier(self):
         service = main.SafeRealtimeLLMService(max_context_turns=12)
@@ -1086,7 +1326,11 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         service.push_error.assert_awaited_once()
 
     async def test_unknown_delayed_transcript_is_not_added_to_local_context(self):
-        service = main.SafeRealtimeLLMService(max_context_turns=12)
+        answer_confirmed = Mock()
+        service = main.SafeRealtimeLLMService(
+            max_context_turns=12,
+            request_follow_up_answer_confirmed=answer_confirmed,
+        )
         with patch.object(
             _OpenAIRealtimeLLMService,
             "handle_evt_input_audio_transcription_completed",
@@ -1097,9 +1341,14 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         parent_transcript.assert_not_awaited()
+        answer_confirmed.assert_not_called()
 
     async def test_blank_managed_transcript_fails_fresh(self):
-        service = main.SafeRealtimeLLMService(max_context_turns=12)
+        answer_confirmed = Mock()
+        service = main.SafeRealtimeLLMService(
+            max_context_turns=12,
+            request_follow_up_answer_confirmed=answer_confirmed,
+        )
         service.push_error = AsyncMock()
         service._conversation_window.begin_user_turn(
             self._message("user-blank", "user")
@@ -1112,15 +1361,22 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(service._recovery_active)
         service.push_error.assert_awaited_once()
+        answer_confirmed.assert_not_called()
 
     async def test_managed_transcript_writes_one_canonical_local_user(self):
-        service = main.SafeRealtimeLLMService(max_context_turns=12)
+        answer_confirmed = Mock(return_value=True)
+        service = main.SafeRealtimeLLMService(
+            max_context_turns=12,
+            request_follow_up_answer_confirmed=answer_confirmed,
+        )
         service._context = _LLMContext()
         service._conversation_window.begin_user_turn(
             self._message("user-1", "user")
         )
         service._conversation_window.activate("user-1")
         service._transcript_ready_events["user-1"] = asyncio.Event()
+        service._follow_up_answer_item_sequences["user-1"] = 7
+        service._seen_input_speech_items["user-1"] = (100, 7)
         with patch.object(
             _OpenAIRealtimeLLMService,
             "handle_evt_input_audio_transcription_completed",
@@ -1131,6 +1387,7 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         parent_transcript.assert_not_awaited()
+        answer_confirmed.assert_called_once_with("user-1", 7, "hello")
         self.assertTrue(service._transcript_ready_events["user-1"].is_set())
         self.assertEqual(service._context.get_messages(), [])
         service._sync_local_context(include_active_user=True)
@@ -1319,6 +1576,104 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             {"status": "done"},
             properties=None,
         )
+
+    async def test_end_conversation_result_forbids_model_continuation(self):
+        service = main.SafeRealtimeLLMService(max_context_turns=12)
+        service._finalize_silent_control_result = AsyncMock()
+        captured_properties = None
+
+        async def result_callback(_result, *, properties=None):
+            nonlocal captured_properties
+            captured_properties = properties
+            await cast(Any, properties).on_context_updated()
+
+        async def end_handler(params):
+            await params.result_callback(
+                {"status": "closed_silently"},
+                properties=main.SilentCloseResultProperties(),
+            )
+
+        service.register_function(main.END_CONVERSATION_TOOL_NAME, end_handler)
+        _, wrapped_handler = service._registered_function
+        params = types.SimpleNamespace(
+            tool_call_id="silent-result-call",
+            arguments={},
+            result_callback=result_callback,
+        )
+        service._tool_call_generations[params.tool_call_id] = 0
+
+        await wrapped_handler(params)
+
+        self.assertIsInstance(
+            captured_properties,
+            main.SilentCloseResultProperties,
+        )
+        self.assertFalse(cast(Any, captured_properties).run_llm)
+        service._finalize_silent_control_result.assert_awaited_once_with(
+            params.tool_call_id,
+            0,
+        )
+        self.assertIsNone(service._continuation_task)
+        service._pending_tool_result_ids.clear()
+        service._pending_tool_results_drained.set()
+
+    async def test_silent_control_result_finishes_replayable_turn_without_response(self):
+        service = main.SafeRealtimeLLMService(max_context_turns=12)
+        service._context = _LLMContext(
+            [
+                {
+                    "role": "tool",
+                    "tool_call_id": "silent-call",
+                    "content": '{"status":"closed_silently"}',
+                }
+            ]
+        )
+        service._conversation_window.begin_user_turn(
+            self._message("silent-user", "user")
+        )
+        service._conversation_window.attach_transcript(
+            "silent-user",
+            "purple elephant",
+        )
+        service._conversation_window.activate("silent-user")
+        service._conversation_window.observe_item(
+            {
+                "id": "silent-call-item",
+                "type": "function_call",
+                "call_id": "silent-call",
+                "name": main.END_CONVERSATION_TOOL_NAME,
+                "arguments": "{}",
+            }
+        )
+        service._pending_tool_result_ids.add("silent-call")
+        service._pending_tool_results_drained.clear()
+        service._turn_terminal.clear()
+        service.push_error = AsyncMock()
+        service._create_response = AsyncMock()
+
+        async def send_result(call_id, content):
+            self.assertEqual(call_id, "silent-call")
+            self.assertIn("closed_silently", content)
+            service._conversation_window.observe_item(
+                {
+                    "id": "silent-result-item",
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": content,
+                }
+            )
+            service._silent_tool_output_events[call_id].set()
+
+        service._send_tool_result = send_result
+
+        await service._finalize_silent_control_result("silent-call", 0)
+
+        self.assertTrue(service._conversation_window.replay_snapshot()[0].replayable)
+        self.assertEqual(service._pending_tool_result_ids, set())
+        self.assertTrue(service._pending_tool_results_drained.is_set())
+        self.assertTrue(service._turn_terminal.is_set())
+        service._create_response.assert_not_awaited()
+        service.push_error.assert_not_awaited()
 
     async def test_tool_handler_exception_returns_error_result(self):
         service = main.SafeRealtimeLLMService(max_context_turns=12)
@@ -2894,7 +3249,7 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         websocket.send.assert_not_awaited()
 
-    async def test_only_one_no_wake_follow_up_is_allowed_per_device_wake(self):
+    async def test_three_serial_follow_ups_rearm_only_after_each_answer(self):
         websocket = _FakeDeviceWebSocket()
         media_check = AsyncMock(
             return_value=websocket_handler.MediaActivity.CLEAR
@@ -2906,34 +3261,266 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self._admit(handler, websocket)
         self.assertTrue(handler.note_device_wake())
 
+        tokens = []
+        for number in range(1, 4):
+            tool_call_id = f"request-{number}"
+            self.assertEqual(
+                await self._reserve(handler, tool_call_id),
+                websocket_handler.FollowUpReservationOutcome.RESERVED,
+            )
+            self._activate(handler, tool_call_id)
+            self._qualify_response(
+                handler,
+                f"question-{number}",
+                tool_call_id,
+            )
+            request, _commit = await self._open_requested_follow_up(
+                handler,
+                websocket,
+            )
+            tokens.append(request["token"])
+            handler.note_request_follow_up_turn_boundary()
+            self.assertTrue(handler._request_follow_up_budget_spent)
+            item_id = f"answer-item-{number}"
+            self.assertTrue(
+                handler.bind_request_follow_up_answer(item_id, number)
+            )
+            self.assertTrue(
+                handler.confirm_request_follow_up_answer(
+                    item_id,
+                    number,
+                    f"answer {number}",
+                )
+            )
+            self.assertFalse(handler._request_follow_up_budget_spent)
+
+        self.assertEqual(len(set(tokens)), 3)
         self.assertEqual(
-            await self._reserve(handler, "first-request"),
+            await self._reserve(handler, "request-4"),
             websocket_handler.FollowUpReservationOutcome.RESERVED,
         )
-        self._activate(handler, "first-request")
-        self._qualify_response(
-            handler,
-            "first-question",
-            "first-request",
-        )
-        await self._open_requested_follow_up(handler, websocket)
+        self.assertEqual(media_check.await_count, 7)
+        handler.cancel_request_follow_up()
 
-        # Speech in the accepted no-wake window starts another model turn but
-        # does not replenish the physical wake's budget.
+    async def test_follow_up_answer_confirmation_requires_exact_fresh_item_identity(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.note_device_wake()
+        initial_context = handler.capture_phase_authorization_context()
+        await self._reserve(handler)
+        handler._device_audio_generation = 91
+        sent_before_stale_initial = websocket.send.await_count
+        await handler.broadcast_phase("thinking", initial_context)
+        self.assertEqual(websocket.send.await_count, sent_before_stale_initial)
+        self.assertEqual(handler._device_audio_generation, 91)
+        self._activate(handler)
+        self._qualify_response(handler, "identity-question")
+        await self._open_requested_follow_up(handler, websocket)
         handler.note_request_follow_up_turn_boundary()
+
+        self.assertTrue(handler.bind_request_follow_up_answer("fresh-item", 8))
+        self.assertFalse(
+            handler.confirm_request_follow_up_answer(
+                "historical-item",
+                7,
+                "delayed historical transcript",
+            )
+        )
+        self.assertFalse(
+            handler.confirm_request_follow_up_answer(
+                "fresh-item",
+                7,
+                "wrong sequence",
+            )
+        )
+        self.assertTrue(
+            handler.confirm_request_follow_up_answer(
+                "fresh-item",
+                8,
+                "current answer",
+            )
+        )
+        self.assertFalse(
+            handler.confirm_request_follow_up_answer(
+                "fresh-item",
+                8,
+                "duplicate transcript",
+            )
+        )
+
+    async def test_repeated_open_phases_carry_only_the_current_answer_token(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.note_device_wake()
+        await self._reserve(handler)
+        self._activate(handler)
+        self._qualify_response(handler, "token-question")
+        request, _commit = await self._open_requested_follow_up(handler, websocket)
+        handler.note_request_follow_up_turn_boundary()
+        answer_context = handler.capture_phase_authorization_context()
+        self.assertIsNotNone(answer_context)
+
+        await handler.broadcast_phase("thinking", answer_context)
+        phase = json.loads(websocket.send.await_args_list[-1].args[0])
         self.assertEqual(
-            await self._reserve(handler, "second-request"),
+            phase,
+            {
+                "type": "phase",
+                "value": "thinking",
+                "token": request["token"],
+                "session_nonce": handler._active_session_nonce,
+                "wake_generation": handler._device_wake_generation,
+            },
+        )
+        self.assertTrue(handler.bind_request_follow_up_answer("answer-item", 1))
+        self.assertTrue(
+            handler.confirm_request_follow_up_answer(
+                "answer-item",
+                1,
+                "answer",
+            )
+        )
+        handler.note_assistant_playback_started()
+        replying_context = handler.capture_phase_authorization_context()
+        await handler.broadcast_phase("replying", replying_context)
+        self.assertEqual(
+            json.loads(websocket.send.await_args_list[-1].args[0])["token"],
+            request["token"],
+        )
+
+        stale_context = replying_context
+        await self._reserve(handler, "next-round")
+        sent_before_stale = websocket.send.await_count
+        await handler.broadcast_phase("thinking", stale_context)
+        self.assertEqual(websocket.send.await_count, sent_before_stale)
+        handler.cancel_request_follow_up(send_cancel=False)
+
+    async def test_physical_wake_deadline_blocks_audio_output_and_new_round(self):
+        websocket = _FakeDeviceWebSocket()
+        media_check = AsyncMock(return_value=websocket_handler.MediaActivity.CLEAR)
+        handler = websocket_handler.WebSocketHandler(
+            follow_up_ms=0,
+            media_activity_check=media_check,
+        )
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        handler._physical_wake_deadline = websocket_handler.time.monotonic() - 0.001
+
+        self.assertFalse(handler._binary_audio_is_admitted(websocket))
+        self.assertFalse(
+            await handler.bind_assistant_output_response("late-response", 1)
+        )
+        self.assertEqual(
+            await handler.reserve_request_follow_up("late-follow-up"),
             websocket_handler.FollowUpReservationOutcome.REQUIRES_WAKE,
         )
-        self.assertEqual(websocket.send.await_count, 2)
+        media_check.assert_not_awaited()
+        websocket.send.assert_not_awaited()
 
-        self.assertTrue(handler.note_device_wake())
-        self.assertEqual(
-            await self._reserve(handler, "new-wake-request"),
-            websocket_handler.FollowUpReservationOutcome.RESERVED,
+    async def test_stop_mute_and_recovery_paths_never_rearm_consumed_answer(self):
+        for message_type in (
+            "interrupt",
+            "flush",
+            "button_cancel",
+            "false_flag",
+        ):
+            with self.subTest(message_type=message_type):
+                websocket = _FakeDeviceWebSocket()
+                handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+                session_nonce = self._admit(handler, websocket)
+                handler.note_device_wake()
+                await self._open_and_confirm_answer(handler, websocket)
+
+                payload = {
+                    "type": message_type,
+                    "session_nonce": session_nonce,
+                    "wake_generation": handler._device_wake_generation,
+                }
+                if message_type == "interrupt":
+                    payload["reason"] = "test_stop"
+                handled = await handler._handle_device_control_message(
+                    payload,
+                    websocket,
+                )
+
+                self.assertTrue(handled)
+                self.assertTrue(handler._request_follow_up_budget_spent)
+                self.assertIsNone(handler._request_follow_up_answer_grant)
+                self.assertFalse(
+                    handler.confirm_request_follow_up_answer(
+                        "late-item",
+                        99,
+                        "late transcript",
+                    )
+                )
+
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.note_device_wake()
+        await self._open_and_confirm_answer(handler, websocket)
+        handler._on_connection_recovery_started()
+        self.assertTrue(handler._request_follow_up_budget_spent)
+        self.assertIsNone(handler._request_follow_up_answer_grant)
+
+    async def test_competing_tool_silent_reply_and_disconnect_revoke_rearm(self):
+        for path in ("competing_tool", "silent_reply", "disconnect"):
+            with self.subTest(path=path):
+                websocket = _FakeDeviceWebSocket()
+                handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+                session_nonce = self._admit(handler, websocket)
+                handler.note_device_wake()
+                await self._open_and_confirm_answer(handler, websocket)
+
+                if path == "competing_tool":
+                    await handler.cancel_deferred_conversation_controls()
+                elif path == "silent_reply":
+                    await handler._before_reply_idle()
+                else:
+                    await handler._retire_bound_socket(websocket, session_nonce)
+
+                self.assertTrue(handler._request_follow_up_budget_spent)
+                self.assertIsNone(handler._request_follow_up_answer_grant)
+                self.assertFalse(
+                    handler.confirm_request_follow_up_answer(
+                        "late-item",
+                        99,
+                        "late transcript",
+                    )
+                )
+
+    async def test_media_denial_consumes_rearmed_answer_authority(self):
+        websocket = _FakeDeviceWebSocket()
+        media_check = AsyncMock(
+            side_effect=(
+                websocket_handler.MediaActivity.CLEAR,
+                websocket_handler.MediaActivity.CLEAR,
+                websocket_handler.MediaActivity.ACTIVE,
+            )
         )
-        self.assertEqual(media_check.await_count, 3)
-        handler.cancel_request_follow_up()
+        handler = websocket_handler.WebSocketHandler(
+            follow_up_ms=0,
+            media_activity_check=media_check,
+        )
+        self._admit(handler, websocket)
+        handler.note_device_wake()
+        await self._open_and_confirm_answer(handler, websocket)
+
+        self.assertEqual(
+            await self._reserve(handler, "media-denied-round"),
+            websocket_handler.FollowUpReservationOutcome.REQUIRES_WAKE,
+        )
+        self.assertTrue(handler._request_follow_up_budget_spent)
+        self.assertIsNone(handler._request_follow_up_answer_grant)
+        self.assertFalse(
+            handler.confirm_request_follow_up_answer(
+                "replayed-item",
+                99,
+                "replayed answer",
+            )
+        )
 
     async def test_reconnect_recovery_and_replay_boundaries_do_not_reset_budget(self):
         first = _FakeDeviceWebSocket()
@@ -3602,6 +4189,16 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(handler._request_follow_up_reservation)
         self.assertIsNotNone(handler._user_turn_non_close_generation)
+        self.assertTrue(handler._request_follow_up_budget_spent)
+        self.assertTrue(handler.bind_request_follow_up_answer("fresh-item", 1))
+        self.assertTrue(
+            handler.confirm_request_follow_up_answer(
+                "fresh-item",
+                1,
+                "fresh answer",
+            )
+        )
+        self.assertFalse(handler._request_follow_up_budget_spent)
         self.assertEqual(websocket.send.await_count, 2)
 
     async def test_microphone_audio_is_blocked_until_exact_commit_ack(self):
@@ -3754,6 +4351,29 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     "wake_generation": 2,
                 },
             )
+        for value in ("listening", "thinking", "replying"):
+            self.assertEqual(
+                handler._build_phase_control(
+                    value,
+                    session_nonce=session_nonce,
+                    wake_generation=2,
+                    follow_up_token=77,
+                ),
+                {
+                    "type": "phase",
+                    "value": value,
+                    "session_nonce": session_nonce,
+                    "wake_generation": 2,
+                    "token": 77,
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "terminal idle"):
+            handler._build_phase_control(
+                "idle",
+                session_nonce=session_nonce,
+                wake_generation=2,
+                follow_up_token=77,
+            )
 
     async def test_phase_send_completes_before_a_new_wake_can_advance_ownership(self):
         send_started = asyncio.Event()
@@ -3788,6 +4408,27 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await phase_send
         self.assertTrue(await new_wake)
         self.assertEqual(handler._device_wake_generation, 2)
+
+    async def test_phase_revalidates_after_output_settlement(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake(1))
+        context = handler.capture_phase_authorization_context()
+        handler._device_audio_generation = 73
+        handler._retire_assistant_output_grant = Mock(return_value=object())
+
+        async def settle_and_advance(_grant):
+            handler._request_follow_up_epoch += 1
+            return True
+
+        handler._settle_retired_assistant_output = AsyncMock(
+            side_effect=settle_and_advance
+        )
+
+        self.assertFalse(await handler.broadcast_phase("thinking", context))
+        self.assertEqual(handler._device_audio_generation, 73)
+        self.assertEqual(websocket.send.await_count, 0)
 
     async def test_client_revoke_clear_settles_before_next_wake_admission(self):
         websocket = _FakeDeviceWebSocket()
@@ -4094,6 +4735,174 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             await handler._authorize_output_audio(("response-a", 7), websocket)
         )
+
+    async def test_audio_drain_wait_never_holds_socket_transition_lock(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class DrainTransport:
+            async def bind_output_audio_generation(self, _context, _websocket):
+                return True
+
+            async def gracefully_finish_output_audio_generation(
+                self,
+                _context,
+                _websocket,
+                ownership_is_current,
+                *,
+                timeout_s,
+            ):
+                self.assert_timeout = timeout_s
+                entered.set()
+                await release.wait()
+                return ownership_is_current()
+
+            def retire_output_audio_generation(self, _context=None):
+                return True
+
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.transport = DrainTransport()
+        self.assertTrue(handler.note_device_wake(1))
+        self.assertTrue(
+            await handler.bind_assistant_output_response("response-a", 7)
+        )
+
+        finish = asyncio.create_task(
+            handler.finish_assistant_output_response("response-a", 7)
+        )
+        await entered.wait()
+        await asyncio.wait_for(handler._socket_transition_lock.acquire(), timeout=0.1)
+        handler._socket_transition_lock.release()
+        release.set()
+
+        self.assertTrue(await finish)
+
+    async def test_failed_finish_settles_before_clearing_output_grant(self):
+        settlement_started = asyncio.Event()
+        release_settlement = asyncio.Event()
+
+        class FailedFinishTransport:
+            def __init__(self, websocket):
+                self.admitted_websocket = websocket
+
+            async def bind_output_audio_generation(self, _context, _websocket):
+                return True
+
+            async def gracefully_finish_output_audio_generation(
+                self,
+                _context,
+                _websocket,
+                _ownership_is_current,
+                *,
+                timeout_s,
+            ):
+                _ = timeout_s
+                return False
+
+            async def settle_output_audio_generation(self, _context=None):
+                settlement_started.set()
+                await release_settlement.wait()
+                return True
+
+            def retire_output_audio_generation(self, _context=None):
+                return True
+
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.transport = FailedFinishTransport(websocket)
+        self.assertTrue(handler.note_device_wake(1))
+        self.assertTrue(
+            await handler.bind_assistant_output_response("response-a", 8)
+        )
+        grant = handler._assistant_output_grant
+
+        finish = asyncio.create_task(
+            handler.finish_assistant_output_response("response-a", 8)
+        )
+        await settlement_started.wait()
+        self.assertIs(handler._assistant_output_grant, grant)
+        release_settlement.set()
+
+        self.assertFalse(await finish)
+        self.assertIsNone(handler._assistant_output_grant)
+
+    async def test_stop_disconnect_and_replacement_revoke_audio_drain_owner(self):
+        for path in ("stop", "disconnect", "replacement"):
+            with self.subTest(path=path):
+                entered = asyncio.Event()
+
+                class DrainTransport:
+                    async def bind_output_audio_generation(
+                        self,
+                        _context,
+                        _websocket,
+                    ):
+                        return True
+
+                    async def gracefully_finish_output_audio_generation(
+                        self,
+                        _context,
+                        _websocket,
+                        ownership_is_current,
+                        *,
+                        timeout_s,
+                    ):
+                        _ = timeout_s
+                        entered.set()
+                        while ownership_is_current():
+                            await asyncio.sleep(0)
+                        return False
+
+                    def retire_output_audio_generation(self, _context=None):
+                        return True
+
+                    async def settle_output_audio_generation(self, _context=None):
+                        return True
+
+                websocket = _FakeDeviceWebSocket()
+                handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+                session_nonce = self._admit(handler, websocket)
+                handler.transport = DrainTransport()
+                self.assertTrue(handler.note_device_wake(1))
+                self.assertTrue(
+                    await handler.bind_assistant_output_response(
+                        "response-a",
+                        7,
+                    )
+                )
+                finish = asyncio.create_task(
+                    handler.finish_assistant_output_response("response-a", 7)
+                )
+                await entered.wait()
+
+                if path == "stop":
+                    self.assertTrue(
+                        await handler._handle_device_control_message(
+                            {
+                                "type": "interrupt",
+                                "session_nonce": session_nonce,
+                                "wake_generation": 1,
+                                "reason": "stop",
+                            },
+                            websocket,
+                        )
+                    )
+                elif path == "disconnect":
+                    async with handler._socket_transition_lock:
+                        handler._retire_assistant_output_grant()
+                        handler._mark_socket_retired(websocket)
+                        handler._websockets.clear()
+                        handler._active_session_nonce = None
+                else:
+                    replacement = _FakeDeviceWebSocket()
+                    async with handler._socket_transition_lock:
+                        handler._websockets = {replacement}
+
+                self.assertFalse(await finish)
+                self.assertIsNone(handler._assistant_output_grant)
 
     async def test_retired_output_grant_cancels_only_its_exact_response(self):
         websocket = _FakeDeviceWebSocket()
@@ -4765,7 +5574,7 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(handler._websockets, {new})
         self.assertIsNotNone(handler._request_follow_up_reservation)
-        grant = handler._assistant_output_grant
+        grant = cast(Any, handler._assistant_output_grant)
         self.assertIsNotNone(grant)
         self.assertEqual(cast(Any, grant).response_id, "new-response")
         cancel_output.assert_not_awaited()
@@ -5551,7 +6360,7 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         finally:
             main.TURN_LIVENESS.in_flight = original_in_flight
 
-    def test_zero_mode_exposes_and_registers_only_request_follow_up(self):
+    def test_zero_mode_exposes_and_registers_both_native_controls(self):
         application = cast(Any, main.Application())
         application.follow_up_ms = 0
         application.request_follow_up_supported = True
@@ -5559,7 +6368,8 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             reserve_request_follow_up=AsyncMock(),
             activate_request_follow_up=Mock(return_value=True),
             cancel_request_follow_up=Mock(),
-            request_graceful_close=AsyncMock(),
+            request_silent_close=AsyncMock(),
+            silent_close_is_allowed=Mock(return_value=True),
         )
         functions = {
             main.REQUEST_FOLLOW_UP_TOOL_NAME: object(),
@@ -5579,7 +6389,13 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         application._register_conversation_control_tool()
 
         self.assertEqual(definition["name"], main.REQUEST_FOLLOW_UP_TOOL_NAME)
-        self.assertEqual(set(functions), {main.REQUEST_FOLLOW_UP_TOOL_NAME})
+        self.assertEqual(
+            set(functions),
+            {
+                main.REQUEST_FOLLOW_UP_TOOL_NAME,
+                main.END_CONVERSATION_TOOL_NAME,
+            },
+        )
 
     def test_closed_default_is_exported_through_addon_configuration(self):
         config = (ADDON_ROOT / "config.yaml").read_text(encoding="utf-8")
@@ -5602,6 +6418,19 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("max_output_tokens: 1200", config)
         self.assertIn("enable_voice_memory: false", config)
         self.assertIn(
+            "conversational turn would usefully continue",
+            config,
+        )
+        self.assertIn(
+            "this again after each genuine answer",
+            config,
+        )
+        self.assertIn(
+            "call end_conversation as the sole tool and say nothing before or after it",
+            config,
+        )
+        self.assertNotIn("Ask no optional", config)
+        self.assertIn(
             "NEARBY_MEDIA_PLAYERS=$(bashio::config 'nearby_media_players')",
             run_script,
         )
@@ -5620,7 +6449,9 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(combined.startswith(saved + "\n\n"))
         self.assertIn(main.RAPID_PILOT_POLICY_MARKER, combined)
         self.assertIn("request_follow_up as the sole", combined)
-        self.assertIn("Never claim that\nthe microphone is open", combined)
+        self.assertIn("end_conversation as the sole tool", combined)
+        self.assertIn("produce no spoken reply", combined)
+        self.assertIn("Never claim that the microphone is open", combined)
         self.assertEqual(main.append_rapid_pilot_policy(combined), combined)
         incomplete_marker = f"{saved}\n\n{main.RAPID_PILOT_POLICY_MARKER}"
         self.assertTrue(
@@ -5696,7 +6527,12 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 direct_openclaw_enabled=False,
             )
         )
-        for blocked in ("voice_enrollment", "remember", "request_follow_up"):
+        for blocked in (
+            "voice_enrollment",
+            "remember",
+            "request_follow_up",
+            "end_conversation",
+        ):
             self.assertFalse(
                 main.mcp_tool_is_explicitly_allowed(
                     blocked,
@@ -5758,7 +6594,7 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             reserve_request_follow_up=AsyncMock(),
             activate_request_follow_up=Mock(return_value=True),
             cancel_request_follow_up=Mock(),
-            request_graceful_close=AsyncMock(),
+            request_silent_close=AsyncMock(),
         )
         functions = {
             main.REQUEST_FOLLOW_UP_TOOL_NAME: object(),
@@ -5815,6 +6651,77 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared["type"], "prepare_suppress_followup")
         self.assertEqual(committed["type"], "commit_suppress_followup")
         self.assertEqual(prepared["token"], committed["token"])
+
+    async def test_silent_close_commits_idle_and_blocks_all_assistant_pcm(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        session_nonce = self._admit(handler, websocket)
+        handler.note_device_wake()
+        await self._open_and_confirm_answer(handler, websocket)
+        wake_generation = handler._device_wake_generation
+        self.assertTrue(handler.silent_close_is_allowed())
+        self.assertTrue(
+            await handler.bind_assistant_output_response("close-response", 1)
+        )
+        queued_listening = handler.capture_phase_authorization_context()
+
+        close_task = asyncio.create_task(handler.request_silent_close())
+
+        async def acknowledge(message_type, stage):
+            payload = None
+            while payload is None:
+                for call in reversed(websocket.send.await_args_list):
+                    candidate = json.loads(call.args[0])
+                    if candidate.get("type") == message_type:
+                        payload = candidate
+                        break
+                if payload is None:
+                    await asyncio.sleep(0)
+            await handler._handle_device_control_message(
+                self._graceful_ack(handler, payload, stage, True),
+                websocket,
+            )
+
+        await acknowledge("prepare_suppress_followup", "prepared")
+        await acknowledge("commit_suppress_followup", "committed")
+        await close_task
+
+        controls = [
+            json.loads(call.args[0]) for call in websocket.send.await_args_list
+        ]
+        self.assertEqual(
+            [control["type"] for control in controls[-3:]],
+            ["prepare_suppress_followup", "commit_suppress_followup", "phase"],
+        )
+        self.assertEqual(controls[-1]["value"], "idle")
+        self.assertEqual(controls[-1]["session_nonce"], session_nonce)
+        self.assertEqual(controls[-1]["wake_generation"], wake_generation)
+        self.assertNotIn("token", controls[-1])
+        self.assertTrue(handler._request_follow_up_budget_spent)
+        self.assertIsNone(handler._request_follow_up_answer_grant)
+        self.assertFalse(handler.silent_close_is_allowed())
+        self.assertFalse(
+            await handler._authorize_output_audio(
+                ("close-response", 1),
+                websocket,
+            )
+        )
+        self.assertFalse(
+            await handler.bind_assistant_output_response("forbidden-response", 2)
+        )
+        sent_before_stale_phase = websocket.send.await_count
+        self.assertFalse(
+            await handler.broadcast_phase("listening", queued_listening)
+        )
+        self.assertEqual(websocket.send.await_count, sent_before_stale_phase)
+        self.assertIsNone(handler._device_audio_generation)
+        websocket.close.assert_not_awaited()
+
+        self.assertTrue(handler.note_device_wake(wake_generation + 1))
+        self.assertFalse(handler._silent_close_is_current())
+        self.assertTrue(
+            await handler.bind_assistant_output_response("fresh-response", 3)
+        )
 
     async def test_graceful_close_fails_without_connected_firmware(self):
         handler = websocket_handler.WebSocketHandler()
@@ -5996,6 +6903,242 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             websocket_handler.TURN_LIVENESS.non_close_tool_generation
         )
 
+    async def test_silent_close_waits_for_exact_terminal_ledger_and_discards_pcm(self):
+        service, pushed = self._prepare_decision_service()
+        call_id = "silent-close-call"
+        call_item = {
+            "id": "silent-close-item",
+            "type": "function_call",
+            "call_id": call_id,
+            "name": main.END_CONVERSATION_TOOL_NAME,
+            "arguments": "{}",
+        }
+        await service._handle_evt_conversation_item_added(
+            types.SimpleNamespace(item=call_item)
+        )
+        service._tool_call_details[call_id] = (
+            main.END_CONVERSATION_TOOL_NAME,
+            {},
+        )
+        service._scheduled_tool_call_ids.add(call_id)
+        close_silently = AsyncMock()
+        result_callback = AsyncMock()
+        main.register_end_conversation_tool(
+            service,
+            close_silently,
+            service.end_conversation_is_sole_terminal_tool,
+        )
+        _name, wrapped_handler = service._registered_function
+        tool_task = asyncio.create_task(
+            wrapped_handler(
+                types.SimpleNamespace(
+                    arguments={},
+                    tool_call_id=call_id,
+                    result_callback=result_callback,
+                )
+            )
+        )
+        await service._handle_evt_audio_delta(self._audio_delta())
+        await service._handle_evt_text_delta(
+            self._text_delta("response.text.delta", "discarded text")
+        )
+        await service._handle_evt_audio_transcript_delta(
+            self._text_delta(
+                "response.audio_transcript.delta",
+                "discarded transcript",
+            )
+        )
+        await service._handle_evt_audio_done(
+            types.SimpleNamespace(response_id="decision-response")
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(tool_task.done())
+        close_silently.assert_not_awaited()
+        self.assertFalse(any(isinstance(frame, _TTSAudioRawFrame) for frame in pushed))
+        self.assertFalse(any(isinstance(frame, tuple) for frame in pushed))
+
+        await service._handle_evt_response_done(
+            self._response_done([call_item])
+        )
+        await tool_task
+
+        close_silently.assert_awaited_once_with()
+        result_callback.assert_awaited_once()
+        properties = cast(Any, result_callback.await_args).kwargs["properties"]
+        self.assertFalse(properties.run_llm)
+        self.assertFalse(any(isinstance(frame, _TTSAudioRawFrame) for frame in pushed))
+        self.assertFalse(any(isinstance(frame, tuple) for frame in pushed))
+        self.assertEqual(main.TURN_LIVENESS.in_flight, 0)
+        service.begin_recovery()
+
+    async def test_pending_mixed_function_call_rejects_close_and_releases_pcm(self):
+        service, pushed = self._prepare_decision_service()
+        close_call = {
+            "id": "close-item",
+            "type": "function_call",
+            "call_id": "close-call",
+            "name": main.END_CONVERSATION_TOOL_NAME,
+            "arguments": "{}",
+        }
+        other_call = {
+            "id": "other-item",
+            "type": "function_call",
+            "call_id": "other-call",
+            "name": "other_tool",
+            "arguments": "{}",
+        }
+        for item in (close_call, other_call):
+            await service._handle_evt_conversation_item_added(
+                types.SimpleNamespace(item=item)
+            )
+        service._tool_call_details["close-call"] = (
+            main.END_CONVERSATION_TOOL_NAME,
+            {},
+        )
+        service._running_tool_call_ids.add("close-call")
+        original_in_flight = main.TURN_LIVENESS.in_flight
+        main.TURN_LIVENESS.in_flight = 1
+        try:
+            await service._handle_evt_audio_delta(self._audio_delta())
+            await service._handle_evt_audio_transcript_delta(
+                self._text_delta(
+                    "response.audio_transcript.delta",
+                    "released transcript",
+                )
+            )
+            await service._handle_evt_audio_done(
+                types.SimpleNamespace(response_id="decision-response")
+            )
+            self.assertFalse(
+                await service.end_conversation_is_sole_terminal_tool(
+                    "close-call"
+                )
+            )
+            await service._handle_evt_response_done(
+                self._response_done([close_call, other_call])
+            )
+        finally:
+            main.TURN_LIVENESS.in_flight = original_in_flight
+
+        self.assertTrue(any(isinstance(frame, _TTSAudioRawFrame) for frame in pushed))
+        self.assertIn(("audio_transcript", "released transcript"), pushed)
+        self.assertTrue(any(type(frame).__name__ == "TTSStartedFrame" for frame in pushed))
+        self.assertTrue(any(type(frame).__name__ == "TTSStoppedFrame" for frame in pushed))
+        service.begin_recovery()
+
+    async def test_unverified_terminal_close_call_releases_pcm(self):
+        service, pushed = self._prepare_decision_service()
+        call_item = {
+            "id": "unverified-close-item",
+            "type": "function_call",
+            "call_id": "unverified-close-call",
+            "name": main.END_CONVERSATION_TOOL_NAME,
+            "arguments": "{}",
+        }
+        await service._handle_evt_conversation_item_added(
+            types.SimpleNamespace(item=call_item)
+        )
+        await service._handle_evt_audio_delta(self._audio_delta())
+
+        await service._handle_evt_response_done(
+            self._response_done([call_item])
+        )
+
+        self.assertTrue(any(isinstance(frame, _TTSAudioRawFrame) for frame in pushed))
+        service.begin_recovery()
+
+    async def test_decision_audio_hold_is_bounded_and_initial_audio_is_immediate(self):
+        service, pushed = self._prepare_decision_service()
+        service.DECISION_AUDIO_HOLD_TIMEOUT_S = 0.001
+        await service._handle_evt_audio_delta(self._audio_delta(audio=b"bounded"))
+        self.assertFalse(any(isinstance(frame, _TTSAudioRawFrame) for frame in pushed))
+        await asyncio.sleep(0.01)
+        self.assertTrue(any(isinstance(frame, _TTSAudioRawFrame) for frame in pushed))
+        service.begin_recovery()
+
+    async def test_decision_output_hold_has_an_independent_event_count_bound(self):
+        service, pushed = self._prepare_decision_service()
+        cast(Any, service).DECISION_OUTPUT_HOLD_MAX_EVENTS = 2
+        for text in ("first", "second"):
+            await service._handle_evt_text_delta(
+                self._text_delta("response.text.delta", text)
+            )
+
+        self.assertIn(("text", "first"), pushed)
+        self.assertIn(("text", "second"), pushed)
+        self.assertTrue(cast(Any, service._decision_output_hold).released)
+        service.begin_recovery()
+
+    async def test_stale_decision_output_callbacks_cannot_mutate_current_hold(self):
+        service, pushed = self._prepare_decision_service()
+        await service._handle_evt_audio_delta(self._audio_delta())
+        await service._handle_evt_text_delta(
+            types.SimpleNamespace(response_id="old-response", delta="old text")
+        )
+        await service._handle_evt_audio_transcript_delta(
+            types.SimpleNamespace(
+                response_id="old-response",
+                delta="old transcript",
+            )
+        )
+        await service._handle_evt_audio_done(
+            types.SimpleNamespace(response_id="old-response")
+        )
+
+        hold = service._decision_output_hold
+        self.assertIsNotNone(hold)
+        self.assertFalse(cast(Any, hold).audio_done)
+        self.assertEqual(cast(Any, hold).text_events, [])
+        self.assertEqual(pushed, [])
+        await service._handle_evt_audio_done(
+            types.SimpleNamespace(response_id="decision-response")
+        )
+        self.assertTrue(cast(Any, hold).audio_done)
+        service.begin_recovery()
+
+        ordinary = main.SafeRealtimeLLMService()
+        ordinary._current_audio_response = None
+        ordinary.stop_ttfb_metrics = AsyncMock()
+        ordinary._active_output_response_context = ("ordinary-response", 1)
+        ordinary._assistant_output_frame_created = Mock(return_value=True)
+        ordinary_pushed = []
+        ordinary.push_frame = AsyncMock(
+            side_effect=lambda frame, *_args: ordinary_pushed.append(frame)
+        )
+        await ordinary._handle_evt_audio_delta(
+            self._audio_delta(
+                response_id="ordinary-response",
+                audio=b"ordinary",
+            )
+        )
+        self.assertTrue(
+            any(isinstance(frame, _TTSAudioRawFrame) for frame in ordinary_pushed)
+        )
+
+    async def test_recovery_start_immediately_retires_output_generation(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.note_device_wake()
+        retire = Mock(return_value=True)
+        settle = AsyncMock(return_value=True)
+        handler.transport = types.SimpleNamespace(
+            retire_output_audio_generation=retire,
+            settle_output_audio_generation=settle,
+        )
+        self.assertTrue(
+            await handler.bind_assistant_output_response("response-a", 1)
+        )
+        cast(Any, handler).MAX_WEDGE_TASKS = 0
+
+        handler._on_connection_recovery_started()
+        await asyncio.sleep(0)
+
+        self.assertIsNone(handler._assistant_output_grant)
+        self.assertIsNone(handler._device_audio_generation)
+        retire.assert_called_with(("response-a", 1))
+        settle.assert_awaited_once_with(("response-a", 1))
+
     async def test_build_pipeline_does_not_start_runner(self):
         handler = websocket_handler.WebSocketHandler()
         runner = AsyncMock()
@@ -6083,6 +7226,180 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             authoritative_service,
         )
         self.assertEqual(recording_service.started, ["voice-pe"])
+
+    async def test_phase_authority_expires_at_physical_wake_ceiling(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake(1))
+        progress_context = handler.capture_phase_authorization_context()
+        terminal_context = (
+            handler.capture_terminal_idle_phase_authorization_context()
+        )
+        handler._device_audio_generation = None
+        handler._physical_wake_deadline = 0.0
+
+        self.assertIsNone(handler.capture_phase_authorization_context())
+        self.assertFalse(
+            await handler.broadcast_phase("listening", progress_context)
+        )
+        self.assertFalse(await handler.broadcast_phase("idle", terminal_context))
+        self.assertEqual(websocket.send.await_count, 0)
+        self.assertIsNone(handler._device_audio_generation)
+
+    async def test_slow_tool_thinking_preserves_response_a_output_owner(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.note_device_wake(1)
+        retire = Mock(return_value=True)
+        settle = AsyncMock(return_value=True)
+        handler.transport = types.SimpleNamespace(
+            bind_output_audio_generation=AsyncMock(return_value=True),
+            retire_output_audio_generation=retire,
+            settle_output_audio_generation=settle,
+        )
+        self.assertTrue(
+            await handler.bind_assistant_output_response("response-a", 1)
+        )
+        grant = cast(Any, handler._assistant_output_grant)
+        context = handler.capture_phase_authorization_context()
+        original_in_flight = websocket_handler.TURN_LIVENESS.in_flight
+        websocket_handler.TURN_LIVENESS.in_flight = 1
+        try:
+            self.assertTrue(
+                await handler.broadcast_phase(
+                    "thinking",
+                    context,
+                    preserve_output=True,
+                )
+            )
+        finally:
+            websocket_handler.TURN_LIVENESS.in_flight = original_in_flight
+
+        self.assertIs(handler._assistant_output_grant, grant)
+        self.assertTrue(handler._assistant_output_grant_is_current(grant))
+        retire.assert_not_called()
+        settle.assert_not_awaited()
+        self.assertIsNone(handler._device_audio_generation)
+        phase = json.loads(cast(Any, websocket.send.await_args).args[0])
+        self.assertEqual(phase["value"], "thinking")
+
+    async def test_recovery_racing_transport_bind_cannot_restore_output_grant(self):
+        bind_started = asyncio.Event()
+        release_bind = asyncio.Event()
+        retired = []
+
+        class RacingTransport:
+            async def bind_output_audio_generation(self, context, _websocket):
+                bind_started.set()
+                await release_bind.wait()
+                self.bound = context
+                return True
+
+            def retire_output_audio_generation(self, context=None):
+                retired.append(context)
+                return True
+
+            async def settle_output_audio_generation(self, _context=None):
+                return True
+
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.transport = RacingTransport()
+        handler.note_device_wake(1)
+
+        binding = asyncio.create_task(
+            handler.bind_assistant_output_response("response-racing", 2)
+        )
+        await bind_started.wait()
+        handler._on_connection_recovery_started()
+        release_bind.set()
+
+        self.assertFalse(await binding)
+        self.assertTrue(handler._connection_recovery_active)
+        self.assertIsNone(handler._assistant_output_grant)
+        self.assertIn(("response-racing", 2), retired)
+        self.assertFalse(
+            await handler._authorize_output_audio(
+                ("response-racing", 2),
+                websocket,
+            )
+        )
+
+    async def test_historical_speech_pair_after_recovery_cannot_rearm(self):
+        answer_started = Mock(return_value=True)
+        answer_confirmed = Mock(return_value=True)
+        service = main.SafeRealtimeLLMService(
+            max_context_turns=12,
+            request_follow_up_answer_started=answer_started,
+            request_follow_up_answer_confirmed=answer_confirmed,
+        )
+        service._conversation_window.begin_user_turn(
+            self._message("old-user", "user")
+        )
+        service._conversation_window.attach_transcript("old-user", "old answer")
+        service._conversation_window.activate("old-user")
+        self.assertTrue(
+            service._conversation_window.finish_response(
+                "completed",
+                [self._message("old-assistant", "assistant", "old reply")],
+            )
+        )
+        service._conversation_window.replace_item_ids(
+            {
+                "old-user": "replayed-user",
+                "old-assistant": "replayed-assistant",
+            }
+        )
+        old_generation = service._session_generation
+        service._session_generation += 1
+        service._input_speech_ledger_generation = service._session_generation
+        service._seen_input_speech_items.clear()
+        service._last_input_speech_start_ms = -1
+
+        token = main._CURRENT_REALTIME_SESSION_GENERATION.set(old_generation)
+        try:
+            await service._handle_evt_speech_started(
+                types.SimpleNamespace(item_id="old-user", audio_start_ms=100)
+            )
+            await service.handle_evt_input_audio_transcription_completed(
+                types.SimpleNamespace(item_id="old-user", transcript="old answer")
+            )
+        finally:
+            main._CURRENT_REALTIME_SESSION_GENERATION.reset(token)
+
+        await service._handle_evt_speech_started(
+            types.SimpleNamespace(item_id="replayed-user", audio_start_ms=200)
+        )
+        await service.handle_evt_input_audio_transcription_completed(
+            types.SimpleNamespace(
+                item_id="replayed-user",
+                transcript="old answer",
+            )
+        )
+        answer_started.assert_not_called()
+        answer_confirmed.assert_not_called()
+        self.assertEqual(service._follow_up_answer_item_sequences, {})
+
+        await service._handle_evt_speech_started(
+            types.SimpleNamespace(item_id="fresh-user", audio_start_ms=201)
+        )
+        service._conversation_window.begin_user_turn(
+            self._message("fresh-user", "user")
+        )
+        service._conversation_window.activate("fresh-user")
+        await service.handle_evt_input_audio_transcription_completed(
+            types.SimpleNamespace(
+                item_id="fresh-user",
+                transcript="fresh answer",
+            )
+        )
+
+        answer_started.assert_called_once_with("fresh-user", 1)
+        answer_confirmed.assert_called_once_with("fresh-user", 1, "fresh answer")
+        self.assertEqual(len(service._seen_input_speech_items), 1)
 
 
 if __name__ == "__main__":

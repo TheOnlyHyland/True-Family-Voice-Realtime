@@ -8,11 +8,11 @@ A complete, from-zero walkthrough. You'll set up two halves:
 Plan ~30–45 minutes the first time. Later firmware updates require deliberately
 advancing the two pinned release references after reviewing the new release.
 
-> **Mandatory 0.21 order:** firmware 0.19.0 or newer must be installed and
-> verified before backend 0.21.0 is started. During an upgrade, leave the old
-> backend running while firmware updates, then update the backend. During a
-> rollback, roll back the backend first and firmware second. Do not reverse
-> either order.
+> **The backend 0.22.0 firmware binding is finalized to exact firmware 0.20.0.**
+> Update and verify firmware first, then install backend 0.22.0 only from its
+> protected published image. Until that image and GitHub release exist, keep
+> using released backend 0.21.1. A source checkout is not deployable. Roll back
+> backend first and firmware second.
 
 ```
 Home Assistant Voice PE          Home Assistant (your box)             Cloud
@@ -84,7 +84,7 @@ state?" tool — keep it; it's what answers *"is the light on?"*.
 
 ### 1.4 Minimal configuration
 
-Before the first 0.21.0 run, configure all required authority and media fences:
+Before the first run, configure all required authority and media fences:
 
 | Option | Value |
 |---|---|
@@ -96,11 +96,12 @@ Before the first 0.21.0 run, configure all required authority and media fences:
 Everything else can wait. The full reference — every option, its default, and when
 to change it — is in the [Configuration Reference](configuration.md).
 
-### 1.5 Leave 0.21.0 stopped until firmware is ready
+### 1.5 Use only the protected 0.22.0 release artifact
 
-Save the configuration, but do **not** start backend 0.21.0 yet. Complete the
-firmware update below first. This is a protocol compatibility requirement, not
-an optional troubleshooting preference.
+Save the configuration, but do **not** install or start backend 0.22.0 from a
+source checkout. Its binding is finalized to firmware 0.20.0, which must be
+updated and verified first. Install backend 0.22.0 only after the protected image
+and GitHub release exist; otherwise remain on released backend 0.21.1.
 
 ---
 
@@ -167,8 +168,8 @@ Two of these confuse people, so to be clear:
 
 1. In ESPHome Builder, **Edit** the adopted device and **replace its entire YAML** with
    a ready-made stub from the firmware repo:
-   - DHCP: [`esphome-builder.dhcp.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.dhcp.yaml)
-   - Fixed IP: [`esphome-builder.static-ip.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.static-ip.yaml)
+   - DHCP: [`esphome-builder.dhcp.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.0/esphome-builder.dhcp.yaml)
+   - Fixed IP: [`esphome-builder.static-ip.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.0/esphome-builder.static-ip.yaml)
 
    Set `name` and `friendly_name`, and **keep** the `packages:` / `dashboard_import:`
    lines — those are what pull the full firmware from the repo. Keep the device
@@ -178,7 +179,7 @@ Two of these confuse people, so to be clear:
    > `va_url:` line under `substitutions:` with your HA host, e.g.
    > `va_url: "ws://192.168.1.x:8080/"`.
 
-   The two `0.19.0` references are immutable and do not discover future releases.
+   The two `0.20.0` references are immutable and do not discover future releases.
    For an approved update, advance both references to the exact newer tag or
    deliberately use that release's pinned stub.
 
@@ -189,10 +190,13 @@ Two of these confuse people, so to be clear:
 
 The device now boots with compatible firmware and waits for the backend.
 
-### 2.5 Start the backend
+### 2.5 Start the protected published backend
 
-Only after the firmware update succeeds, click **Start** on the add-on and open
-the **Log** tab. A healthy start shows `✅ Fetched N MCP tools` and
+Only after exact firmware 0.20.0 succeeds, install and start the protected
+published backend 0.22.0 image. If that release is not yet available, keep using
+released backend 0.21.1 rather than a source checkout. Click **Start** on the
+add-on and open the **Log** tab. A healthy start shows
+`✅ Fetched N MCP tools` and
 `Creating session with N tools` (with `Hass*` names). The add-on listens on port
 **8080**, and the device can now connect.
 
@@ -207,11 +211,11 @@ the **Log** tab. A healthy start shows `✅ Fetched N MCP tools` and
    → a wake chime plays and the ring shows **listening**.
 3. Ask for something you exposed, e.g. *"turn on the bedroom lamp"* → the ring shows
    **thinking** → it acts and replies.
-4. Ordinary replies close the mic. If the assistant must ask one necessary
-   question, it can open one no-wake follow-up window for that physical wake;
-otherwise say the wake word again. Missing, active, or uncertain nearby media
-scope keeps even
-   that one window closed, while the conversation remains ready after re-waking.
+4. Ordinary replies close the mic. In 0.22.0, the assistant may request one
+   useful no-wake question at a time and continue again after each genuine
+   answer within the same 120-second physical wake. Missing, active, or uncertain
+   nearby media keeps each requested window closed while conversation context
+   remains available after re-waking.
 5. To interrupt a reply: say **"stop"** or press the **center button**.
 
 **If something's off, check the logs:**
@@ -229,7 +233,7 @@ scope keeps even
 
 - **Firmware:** review the new firmware release, update both immutable refs in
   your device stub to that exact tag, then compile and flash it over Wi-Fi. The
-  pinned `0.19.0` stub deliberately does not advertise moving releases.
+  pinned `0.20.0` stub deliberately does not advertise moving releases.
 - **Add-on:** Home Assistant shows an **Update** badge on the add-on (with a changelog).
   Update firmware first when the release notes require a coordinated protocol
   version, verify it, then update the add-on image.
@@ -248,7 +252,7 @@ Once the basics work, the fun starts. Each of these has a full guide in
   See [Persona & voices](features.md#persona--voices).
 - **Speaker recognition** — set speaker names for the local voice-type heuristic;
   pre-provisioned voice prints are also consumed when present. Backend enrollment
-  is not part of the 0.21 rapid pilot. See
+  is not part of the 0.22 rapid pilot. See
   [Speaker recognition](features.md#speaker-recognition).
 - **Memory** — first opt in with `enable_voice_memory: true`, then say *"remember
   that the bins go out Thursday"*. See

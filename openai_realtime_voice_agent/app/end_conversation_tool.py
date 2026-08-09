@@ -1,7 +1,9 @@
-"""Gracefully close a Voice PE conversation after the current reply."""
+"""Silently close an unrelated answer in a reopened Voice PE turn."""
 
 import logging
-from typing import Any, Awaitable, Callable, Dict
+import inspect
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -9,25 +11,26 @@ logger = logging.getLogger(__name__)
 END_CONVERSATION_TOOL_NAME = "end_conversation"
 
 
+@dataclass
+class SilentCloseResultProperties:
+    """Pipecat-compatible result properties that forbid a model continuation."""
+
+    run_llm: bool = False
+    on_context_updated: Optional[Callable[[], Awaitable[None]]] = None
+
+
 def get_end_conversation_tool_definition() -> Dict[str, Any]:
-    """Return the strict OpenAI function schema for graceful conversation close."""
+    """Return the strict OpenAI function schema for silent conversation close."""
     return {
         "type": "function",
         "name": END_CONVERSATION_TOOL_NAME,
         "description": (
-            "Call immediately before your final short spoken reply only when the "
-            "conversation is clearly complete and no answer is expected: for example, "
-            "an explicit goodbye, 'that's all', a standalone thanks after a completed "
-            "request, or a settled exchange with no pending question. This lets the "
-            "final reply finish and then closes the follow-up "
-            "microphone. Do not call merely because you can answer the current question, "
-            "during an ordinary conversational pause, when the user may naturally "
-            "continue, or when your reply asks a question. Never call this alongside "
-            "another tool: finish all actions first, then call this as the sole tool in "
-            "the next decision. Make the final reply a natural response to what the "
-            "person said, such as 'You're welcome.' Never describe closing, ending, "
-            "wrapping up, the microphone, or conversation management. When uncertain, "
-            "leave the conversation open."
+            "Call as the sole tool, with no spoken reply before or after it, only when "
+            "the user's answer through a microphone reopened by request_follow_up is "
+            "random or unrelated to the active conversation. This silently closes that "
+            "conversation and must never reopen the microphone. Do not use it for an "
+            "ordinary answer, a relevant answer, a goodbye, thanks, cancellation, or "
+            "uncertainty. Never call it alongside another tool."
         ),
         "parameters": {
             "type": "object",
@@ -39,14 +42,14 @@ def get_end_conversation_tool_definition() -> Dict[str, Any]:
 
 
 def create_end_conversation_tool_handler(
-    arm_graceful_close: Callable[[], Awaitable[None]],
-    close_is_safe: Callable[[], bool] = lambda: True,
+    close_silently: Callable[[], Awaitable[None]],
+    close_is_safe: Callable[[str], Any] = lambda _tool_call_id: True,
 ) -> Callable[[Any], Awaitable[None]]:
-    """Create a handler that suppresses one follow-up without closing the socket."""
+    """Create a handler whose successful result cannot trigger model output."""
 
     async def end_conversation_tool_handler(params: Any) -> None:
-        arguments = params.arguments or {}
-        if arguments:
+        arguments = {} if params.arguments is None else params.arguments
+        if not isinstance(arguments, dict) or arguments:
             await params.result_callback(
                 {
                     "status": "invalid_arguments",
@@ -55,13 +58,16 @@ def create_end_conversation_tool_handler(
             )
             return
 
-        if not close_is_safe():
+        safe_to_close = close_is_safe(params.tool_call_id)
+        if inspect.isawaitable(safe_to_close):
+            safe_to_close = await safe_to_close
+        if safe_to_close is not True:
             await params.result_callback(
                 {
                     "status": "other_tool_active",
                     "instruction": (
-                        "Complete the other action and continue naturally. Do not close "
-                        "the conversation or mention this tool."
+                        "Continue naturally without closing the conversation or "
+                        "mentioning this tool."
                     ),
                 }
             )
@@ -69,25 +75,24 @@ def create_end_conversation_tool_handler(
 
         control_confirmed = True
         try:
-            await arm_graceful_close()
+            await close_silently()
         except Exception:
             control_confirmed = False
-            logger.exception("Could not arm graceful conversation close")
+            logger.exception("Could not complete silent conversation close")
 
         await params.result_callback(
             {
                 "status": (
-                    "closing_after_reply"
+                    "closed_silently"
                     if control_confirmed
-                    else "closing_reply_unconfirmed"
+                    else "silent_close_unconfirmed"
                 ),
                 "instruction": (
-                    "Reply naturally to what the person said in at most one brief "
-                    "sentence, for example 'You're welcome.' Do not ask a question and "
-                    "never describe closing, ending, wrapping up, the microphone, this "
-                    "tool, or conversation management."
+                    "Produce no spoken or textual reply. The conversation-control "
+                    "decision is complete."
                 ),
-            }
+            },
+            properties=SilentCloseResultProperties(),
         )
 
     return end_conversation_tool_handler
@@ -95,11 +100,11 @@ def create_end_conversation_tool_handler(
 
 def register_end_conversation_tool(
     llm,
-    arm_graceful_close: Callable[[], Awaitable[None]],
-    close_is_safe: Callable[[], bool] = lambda: True,
+    close_silently: Callable[[], Awaitable[None]],
+    close_is_safe: Callable[[str], Any] = lambda _tool_call_id: True,
 ) -> None:
-    """Register graceful-close dispatch on the active OpenAI service."""
+    """Register silent-close dispatch on the active OpenAI service."""
     llm.register_function(
         END_CONVERSATION_TOOL_NAME,
-        create_end_conversation_tool_handler(arm_graceful_close, close_is_safe),
+        create_end_conversation_tool_handler(close_silently, close_is_safe),
     )
