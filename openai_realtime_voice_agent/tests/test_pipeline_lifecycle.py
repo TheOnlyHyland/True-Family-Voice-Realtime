@@ -4552,6 +4552,62 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(handler._request_follow_up_budget_spent)
         self.assertEqual(websocket.send.await_count, 2)
 
+    async def test_openai_speech_can_atomically_bind_before_phase_emitter(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.note_request_follow_up_turn_boundary()
+        await self._reserve(handler)
+        self._activate(handler)
+        self._qualify_response(handler, "atomic-answer-question")
+        await self._open_requested_follow_up(handler, websocket)
+        open_epoch = handler._request_follow_up_epoch
+
+        self.assertTrue(handler.bind_request_follow_up_answer("fresh-item", 1))
+        self.assertIsNone(handler._request_follow_up_reservation)
+        grant = handler._request_follow_up_answer_grant
+        self.assertIsNotNone(grant)
+        self.assertEqual(handler._request_follow_up_epoch, open_epoch + 1)
+
+        handler.note_request_follow_up_turn_boundary()
+        self.assertIs(handler._request_follow_up_answer_grant, grant)
+        self.assertEqual(handler._request_follow_up_epoch, open_epoch + 1)
+        self.assertTrue(
+            handler.confirm_request_follow_up_answer(
+                "fresh-item",
+                1,
+                "fresh answer",
+            )
+        )
+        self.assertFalse(handler._request_follow_up_budget_spent)
+
+        handler._check_nearby_media_activity = AsyncMock(
+            return_value=websocket_handler.MediaActivity.CLEAR
+        )
+        self.assertEqual(
+            await handler.reserve_request_follow_up("next-question"),
+            websocket_handler.FollowUpReservationOutcome.RESERVED,
+        )
+        handler._check_nearby_media_activity.assert_awaited_once_with()
+
+    async def test_malformed_identity_cannot_consume_open_answer(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.note_request_follow_up_turn_boundary()
+        await self._reserve(handler)
+        self._activate(handler)
+        self._qualify_response(handler, "malformed-answer-question")
+        await self._open_requested_follow_up(handler, websocket)
+        reservation = handler._request_follow_up_reservation
+        open_epoch = handler._request_follow_up_epoch
+
+        self.assertFalse(handler.bind_request_follow_up_answer("", 1))
+        self.assertFalse(handler.bind_request_follow_up_answer("fresh-item", 0))
+        self.assertIs(handler._request_follow_up_reservation, reservation)
+        self.assertEqual(handler._request_follow_up_epoch, open_epoch)
+        self.assertIsNone(handler._request_follow_up_answer_grant)
+
     async def test_microphone_audio_is_blocked_until_exact_commit_ack(self):
         websocket = _FakeDeviceWebSocket()
         handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
@@ -7721,6 +7777,57 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 websocket,
             )
         )
+
+    async def test_realtime_speech_start_rearms_before_delayed_phase_callback(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        handler.note_request_follow_up_turn_boundary()
+        await self._reserve(handler)
+        self._activate(handler)
+        self._qualify_response(handler, "production-order-question")
+        await self._open_requested_follow_up(handler, websocket)
+
+        service = main.SafeRealtimeLLMService(
+            max_context_turns=12,
+            request_follow_up_answer_started=handler.bind_request_follow_up_answer,
+            request_follow_up_answer_confirmed=(
+                handler.confirm_request_follow_up_answer
+            ),
+        )
+        service._input_speech_ledger_generation = service._session_generation
+        await service._handle_evt_speech_started(
+            types.SimpleNamespace(item_id="fresh-user", audio_start_ms=100)
+        )
+        grant = handler._request_follow_up_answer_grant
+        self.assertIsNotNone(grant)
+        self.assertEqual(grant.user_item_id, "fresh-user")
+
+        # The real PhaseEmitter receives its queued frame after the OpenAI event
+        # handler returns. Its callback must not consume or replace the grant.
+        handler.note_request_follow_up_turn_boundary()
+        self.assertIs(handler._request_follow_up_answer_grant, grant)
+
+        service._conversation_window.begin_user_turn(
+            self._message("fresh-user", "user")
+        )
+        service._conversation_window.activate("fresh-user")
+        await service.handle_evt_input_audio_transcription_completed(
+            types.SimpleNamespace(
+                item_id="fresh-user",
+                transcript="fresh answer",
+            )
+        )
+        self.assertFalse(handler._request_follow_up_budget_spent)
+
+        handler._check_nearby_media_activity = AsyncMock(
+            return_value=websocket_handler.MediaActivity.CLEAR
+        )
+        self.assertEqual(
+            await handler.reserve_request_follow_up("next-question"),
+            websocket_handler.FollowUpReservationOutcome.RESERVED,
+        )
+        handler._check_nearby_media_activity.assert_awaited_once_with()
 
     async def test_historical_speech_pair_after_recovery_cannot_rearm(self):
         answer_started = Mock(return_value=True)
