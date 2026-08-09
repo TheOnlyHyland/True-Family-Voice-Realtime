@@ -48,7 +48,8 @@ class ReleaseHardeningTests(unittest.TestCase):
         )
         for value in (LOCK_SHA256, MODEL_SHA256, AARCH64_BASE, AMD64_BASE):
             self.assertIn(value, workflow + dockerfile + build)
-        self.assertIn("ADDON_VERSION: 0.22.0", workflow)
+        self.assertIn("ADDON_VERSION: 0.22.1", workflow)
+        self.assertIn("ARG BUILD_VERSION=0.22.1", dockerfile)
         self.assertIn("FIRMWARE_RELEASE_BINDING: finalized", workflow)
         self.assertNotIn("FIRMWARE_RELEASE_BINDING: pending", workflow)
         self.assertNotIn("REGRESSION_FIRMWARE_", workflow)
@@ -102,7 +103,8 @@ class ReleaseHardeningTests(unittest.TestCase):
             "Download exact smoked image artifacts",
             "environment: backend-production",
             'description: "Exact 40-character candidate commit to publish"',
-            'description: "Historical pilot switch; rejected when publishing 0.22.0"',
+            'description: "Required when publish=true, for example v0.22.1"',
+            'description: "Historical pilot switch; rejected when publishing 0.22.1"',
             'test "$GITHUB_SHA" = "$SOURCE_COMMIT"',
             "Refuse immutable version or source-tag overwrite",
             "docker manifest inspect",

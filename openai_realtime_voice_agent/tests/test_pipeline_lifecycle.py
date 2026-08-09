@@ -6402,6 +6402,9 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         run_script = (ADDON_ROOT / "root" / "run.sh").read_text(
             encoding="utf-8"
         )
+        main_source = (ADDON_ROOT / "app" / "main.py").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("follow_up_listen_seconds: 0", config)
         self.assertIn(
@@ -6415,6 +6418,8 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             run_script,
         )
         self.assertIn('nearby_media_players: ""', config)
+        self.assertIn('nearby_media_power_entity: ""', config)
+        self.assertIn("nearby_media_power_entity: str?", config)
         self.assertIn("max_output_tokens: 1200", config)
         self.assertIn("enable_voice_memory: false", config)
         self.assertIn(
@@ -6435,6 +6440,25 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             run_script,
         )
         self.assertIn("export NEARBY_MEDIA_PLAYERS", run_script)
+        self.assertIn('NEARBY_MEDIA_POWER_ENTITY=""', run_script)
+        self.assertIn(
+            "if bashio::config.has_value 'nearby_media_power_entity'; then",
+            run_script,
+        )
+        self.assertIn(
+            "NEARBY_MEDIA_POWER_ENTITY=$(bashio::config "
+            "'nearby_media_power_entity')",
+            run_script,
+        )
+        self.assertIn("export NEARBY_MEDIA_POWER_ENTITY", run_script)
+        self.assertIn(
+            'os.environ.get("NEARBY_MEDIA_POWER_ENTITY", "")',
+            main_source,
+        )
+        self.assertIn(
+            "power_entity_id=nearby_media_power_entity",
+            main_source,
+        )
         self.assertIn(
             "ENABLE_VOICE_MEMORY=$(bashio::config 'enable_voice_memory')",
             run_script,
@@ -6491,6 +6515,21 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             clear=True,
         ):
             with self.assertRaisesRegex(ValueError, "nearby_media_players"):
+                await application.initialize()
+
+    async def test_application_startup_rejects_invalid_power_entity_before_io(self):
+        application = main.Application()
+        with patch.dict(
+            main.os.environ,
+            {
+                "FOLLOW_UP_LISTEN_SECONDS": "0",
+                "NEARBY_MEDIA_PLAYERS": "media_player.living_room_tv",
+                "NEARBY_MEDIA_POWER_ENTITY": "switch.Living_Room",
+                "OPENAI_API_KEY": "not-used-before-power-check",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "nearby_media_power_entity"):
                 await application.initialize()
 
     def test_mcp_allowlist_is_exact_and_empty_fails_closed(self):

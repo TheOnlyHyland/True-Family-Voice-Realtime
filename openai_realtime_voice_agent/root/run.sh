@@ -43,6 +43,10 @@ HA_MCP_URL=$(bashio::config 'ha_mcp_url')
 LONGLIVED_TOKEN=$(bashio::config 'longlived_token')
 MCP_TOOL_ALLOWLIST=$(bashio::config 'mcp_tool_allowlist')
 NEARBY_MEDIA_PLAYERS=$(bashio::config 'nearby_media_players')
+NEARBY_MEDIA_POWER_ENTITY=""
+if bashio::config.has_value 'nearby_media_power_entity'; then
+    NEARBY_MEDIA_POWER_ENTITY=$(bashio::config 'nearby_media_power_entity')
+fi
 ENABLE_VOICE_MEMORY=$(bashio::config 'enable_voice_memory')
 OPENCLAW_URL=$(bashio::config 'openclaw_url')
 ANNOUNCE_PORT=$(bashio::config 'announce_port')
@@ -63,11 +67,11 @@ if [ -z "$OPENAI_API_KEY" ]; then
     exit 1
 fi
 if [ "$FOLLOW_UP_LISTEN_SECONDS" != "0" ]; then
-    bashio::log.error "follow_up_listen_seconds must be 0 for the 0.21.0 rapid pilot"
+    bashio::log.error "follow_up_listen_seconds must be 0 for the 0.22.1 rapid pilot"
     exit 1
 fi
 if [ -z "$NEARBY_MEDIA_PLAYERS" ]; then
-    bashio::log.error "nearby_media_players must list the exact Living Room TV and Chromecast entities for the 0.21.0 rapid pilot"
+    bashio::log.error "nearby_media_players must list media_player.living_room_tv and media_player.living_room_tv_audio for the 0.22.1 rapid pilot"
     exit 1
 fi
 
@@ -96,6 +100,7 @@ export NOISE_REDUCTION
 export LONGLIVED_TOKEN
 export MCP_TOOL_ALLOWLIST
 export NEARBY_MEDIA_PLAYERS
+export NEARBY_MEDIA_POWER_ENTITY
 export ENABLE_VOICE_MEMORY
 export OPENCLAW_URL
 export ANNOUNCE_PORT

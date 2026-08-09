@@ -134,12 +134,17 @@ New installs use `follow_up_listen_seconds: 0`: ordinary replies close the mic.
 The model may request one useful no-wake question at a time and, after each
 genuine answer, request another without a round-count limit inside the existing
 120-second physical wake. A random or unrelated reply ends the conversation
-silently. If an older install has a saved value above 0, the 0.22.0 add-on blocks
+silently. If an older install has a saved value above 0, the 0.22.1 add-on blocks
 startup until you set it to 0.
 
-Version 0.22.0 requires `nearby_media_players` to contain the exact Living Room TV
-and Living Room Chromecast `media_player` entity IDs for this deployment. The
-backend checks only that fixed list
+Version 0.22.1 requires `nearby_media_players` to contain
+`media_player.living_room_tv,media_player.living_room_tv_audio` for this home. Set
+the optional `nearby_media_power_entity` to
+`switch.living_room_tv_smart_switch`. Exact readable `off` skips the players
+because they may be unavailable while unpowered; exact `on` requires every
+player to be clearly inactive. Any uncertain power state keeps the mic closed
+without querying the players. With the power option blank, the backend retains
+the original player-only check. The backend checks this fixed scope
 before preparing and again after firmware READY while the mic is still closed.
 Playing, buffering, on,
 paused, unavailable, unknown, denied, malformed, or timed-out state keeps the

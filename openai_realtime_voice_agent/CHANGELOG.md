@@ -2,6 +2,16 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.1
+
+- Added the optional `nearby_media_power_entity` fence. An exact readable `off`
+  switch state now clears the nearby-media check without querying players that
+  are unavailable while unpowered. Exact `on` retains the existing strict check
+  of every configured player; missing, denied, malformed, unknown, unavailable,
+  or timed-out power state fails closed. Blank configuration retains the 0.22.0
+  player-only behavior. The switch remains internal, read-only, and unavailable
+  to the model.
+
 ## 0.22.0 (source candidate)
 
 - The release firmware binding is finalized to public firmware `0.20.0` from
