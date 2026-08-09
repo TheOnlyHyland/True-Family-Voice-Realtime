@@ -2,6 +2,15 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.2
+
+- Preserved the prior OPEN follow-up transaction's phase token until its exact
+  `replying` phase is delivered, even when the model reserves the next question
+  before playback starts. The predecessor token remains phase-only: it cannot
+  reserve a follow-up, admit microphone audio, or survive recovery, revoke, new
+  wake, disconnect, terminal idle, or cleanup. Stale phase contexts remain
+  fenced by the local transaction epoch, and terminal idle remains tokenless.
+
 ## 0.22.1
 
 - Added the optional `nearby_media_power_entity` fence. An exact readable `off`

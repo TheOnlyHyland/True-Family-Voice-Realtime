@@ -727,6 +727,23 @@ class SingleOwnerTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(owner.abort_calls, 1)
         self.assertTrue(owner.closed)
 
+    async def test_retirement_closes_owner_after_output_settlement_exception(self):
+        transport, _serializer, output = self._transport()
+        owner = _Socket()
+        await transport._on_client_connected(owner)
+        await transport.admit_client(owner)
+        transport.settle_output_audio_generation = AsyncMock(
+            side_effect=RuntimeError("settlement failed")
+        )
+
+        with self.assertLogs("app.single_owner_websocket", level="WARNING"):
+            self.assertTrue(await transport.retire_client(owner))
+
+        self.assertIsNone(transport.admitted_websocket)
+        self.assertIsNone(output._websocket)
+        owner.close.assert_awaited_once_with()
+        self.assertTrue(owner.closed)
+
     async def test_unauthenticated_challenger_cannot_displace_owner(self):
         transport, _serializer, output = self._transport()
         owner = _Socket()

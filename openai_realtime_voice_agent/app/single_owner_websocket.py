@@ -1456,7 +1456,18 @@ class SingleOwnerWebsocketServerTransport(WebsocketServerTransport):
                 if setter is not None:
                     setter(False)
         if settle_output:
-            await self.settle_output_audio_generation()
+            try:
+                await self.settle_output_audio_generation()
+            except asyncio.CancelledError as error:
+                try:
+                    await self.close_socket(websocket)
+                finally:
+                    raise error
+            except Exception as error:
+                logger.warning(
+                    "Voice PE output settlement failed during retirement: %s",
+                    type(error).__name__,
+                )
         closed = await self.close_socket(websocket)
         if not retired:
             logger.warning("Voice PE retire requested for a non-owner socket")
