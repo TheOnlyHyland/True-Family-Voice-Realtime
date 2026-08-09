@@ -62,8 +62,8 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             (ADDON_ROOT / "poetry.lock").read_bytes()
         ).hexdigest()
 
-        self.assertEqual(repository["addons"][0]["version"], "0.21.1")
-        self.assertEqual(pyproject["tool"]["poetry"]["version"], "0.21.1")
+        self.assertEqual(repository["addons"][0]["version"], "0.22.0")
+        self.assertEqual(pyproject["tool"]["poetry"]["version"], "0.22.0")
         locked_versions = {
             package["name"]: package["version"]
             for package in lock["package"]
@@ -75,20 +75,41 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             lock_digest,
             "13193c62fc95a0c05c7b6e89efe7db060b4f00438db46c83dc43a23eb1d9af15",
         )
-        self.assertIn('version: "0.21.1"', config)
+        self.assertIn('version: "0.22.0"', config)
         self.assertIn('follow_up_listen_seconds: 0', config)
         self.assertIn("needs: test", workflow)
         self.assertIn('"poetry==$POETRY_VERSION"', workflow)
         self.assertIn('"poetry-core==$POETRY_CORE_VERSION"', workflow)
         self.assertIn("python -m unittest discover -s tests -v", workflow)
         self.assertIn("poetry sync --only main --no-root", workflow)
-        self.assertIn("Checkout exact installed firmware source commit", workflow)
-        self.assertIn("Download and verify immutable firmware package", workflow)
-        self.assertIn("TRUE_FAMILY_VOICE_REQUIRE_FIRMWARE_VALIDATION:", workflow)
-        self.assertIn("ref: ${{ env.FIRMWARE_SOURCE_COMMIT }}", workflow)
-        self.assertIn("FIRMWARE_VERSION: 0.19.0", workflow)
+        self.assertIn("Checkout exact regression firmware source commit", workflow)
         self.assertIn(
-            "FIRMWARE_SOURCE_COMMIT: bcb3bf4cbf181397b51aa7cc5bca5cfecefc7b3a",
+            "Download and verify immutable release firmware package",
+            workflow,
+        )
+        self.assertIn("TRUE_FAMILY_VOICE_REQUIRE_FIRMWARE_VALIDATION:", workflow)
+        self.assertIn("ref: ${{ env.REGRESSION_FIRMWARE_SOURCE_COMMIT }}", workflow)
+        self.assertIn("FIRMWARE_RELEASE_BINDING: pending", workflow)
+        for field in (
+            "FIRMWARE_RELEASE_VERSION",
+            "FIRMWARE_RELEASE_SOURCE_COMMIT",
+            "FIRMWARE_RELEASE_MANIFEST_SHA256",
+            "FIRMWARE_RELEASE_FACTORY_SHA256",
+            "FIRMWARE_RELEASE_OTA_SHA256",
+            "FIRMWARE_RELEASE_ELF_SHA256",
+            "FIRMWARE_RELEASE_SHA256SUMS_SHA256",
+        ):
+            self.assertIn(f'{field}: ""', workflow)
+        self.assertIn("ref: ${{ env.FIRMWARE_RELEASE_SOURCE_COMMIT }}", workflow)
+        self.assertIn('[[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]]', workflow)
+        self.assertIn("REGRESSION_FIRMWARE_VERSION: 0.19.0", workflow)
+        self.assertIn(
+            "REGRESSION_FIRMWARE_SOURCE_COMMIT: "
+            "bcb3bf4cbf181397b51aa7cc5bca5cfecefc7b3a",
+            workflow,
+        )
+        self.assertIn(
+            "Refuse release or publication while firmware binding is pending",
             workflow,
         )
         self.assertIn("pilot_firmware_source_only", workflow)
@@ -106,9 +127,14 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         self.assertNotIn("pip3 install /tmp/app_build", dockerfile)
 
     def test_vendored_contract_is_bounded_and_explicitly_lan_only(self):
-        self.assertEqual(CONTRACT["minimum_firmware_version"], "0.19.0")
+        self.assertEqual(CONTRACT["backend_version"], "0.22.0")
         self.assertEqual(
-            CONTRACT["validated_firmware_release"],
+            CONTRACT["firmware_release_binding"],
+            {"status": "pending"},
+        )
+        self.assertEqual(CONTRACT["regression_firmware_version"], "0.19.0")
+        self.assertEqual(
+            CONTRACT["regression_firmware_release"],
             {
                 "version": "0.19.0",
                 "manifest_sha256": (
@@ -148,6 +174,45 @@ class FirmwareProtocolContractTests(unittest.TestCase):
                 "microphone_open",
             ],
         )
+        self.assertEqual(
+            CONTRACT["tool_continuation_audio_sequence"],
+            [
+                "response_a_done",
+                "source_and_chunker_work_drained",
+                "final_partial_pcm_padded_at_most_once",
+                "queued_and_active_writes_drained",
+                "follow_up_finalized",
+                "response_b_created",
+            ],
+        )
+        self.assertEqual(
+            CONTRACT["tool_continuation_failure_sequence"],
+            [
+                "finish_deadline_expired",
+                "response_a_generation_settled",
+                "stale_socket_detached_and_closed_or_aborted",
+                "response_a_grant_released",
+                "recovery_without_response_b",
+            ],
+        )
+        self.assertEqual(
+            CONTRACT["phase_semantics"],
+            {
+                "initial_physical_values": [
+                    "listening",
+                    "thinking",
+                    "replying",
+                ],
+                "follow_up_progress_values": [
+                    "listening",
+                    "thinking",
+                    "replying",
+                ],
+                "terminal_value": "idle",
+                "terminal_token_forbidden": True,
+                "physical_wake_ceiling_ms": 120000,
+            },
+        )
 
     def test_vendored_control_shapes_match_backend_source(self):
         source = (ADDON_ROOT / "app" / "websocket_handler.py").read_text(
@@ -163,6 +228,16 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         self.assertEqual(
             CONTRACT["trusted_backend_to_device_fields"],
             {key: list(value) for key, value in TRUSTED_BACKEND_TO_DEVICE_FIELDS.items()},
+        )
+        self.assertEqual(
+            CONTRACT["trusted_backend_to_device_fields"]["phase"],
+            ["type", "value", "session_nonce", "wake_generation"],
+        )
+        self.assertEqual(
+            CONTRACT["trusted_backend_to_device_fields"][
+                "follow_up_progress_phase"
+            ],
+            ["type", "value", "token", "session_nonce", "wake_generation"],
         )
         self.assertEqual(
             CONTRACT["legacy_backend_to_device_fields"],
@@ -219,8 +294,8 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         ):
             self.assertIn(term, source)
 
-    def test_external_final_firmware_artifact_matches_vendored_release(self):
-        release = CONTRACT["validated_firmware_release"]
+    def test_external_regression_firmware_artifact_matches_vendored_release(self):
+        release = CONTRACT["regression_firmware_release"]
         artifact_root = FIRMWARE_ARTIFACT_ROOT
         if artifact_root is None or not artifact_root.is_dir():
             if REQUIRE_EXTERNAL_FIRMWARE:
@@ -268,9 +343,18 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             if REQUIRE_EXTERNAL_FIRMWARE:
                 self.fail("required exact firmware source checkout is absent")
             self.skipTest("optional sibling firmware checkout is not present")
+        actual_version = (FIRMWARE_ROOT / "VERSION").read_text(
+            encoding="utf-8"
+        ).strip()
+        expected_version = CONTRACT["regression_firmware_release"]["version"]
+        if actual_version != expected_version and not REQUIRE_EXTERNAL_FIRMWARE:
+            self.skipTest(
+                "optional sibling firmware checkout does not match the "
+                "regression fixture"
+            )
         self.assertEqual(
-            (FIRMWARE_ROOT / "VERSION").read_text(encoding="utf-8").strip(),
-            CONTRACT["validated_firmware_release"]["version"],
+            actual_version,
+            expected_version,
         )
         cpp = (COMPONENT_ROOT / "va_client.cpp").read_text(encoding="utf-8")
         lifecycle = (COMPONENT_ROOT / "follow_up_lifecycle.h").read_text(

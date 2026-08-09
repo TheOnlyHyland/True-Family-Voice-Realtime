@@ -48,7 +48,8 @@ class ReleaseHardeningTests(unittest.TestCase):
         )
         for value in (LOCK_SHA256, MODEL_SHA256, AARCH64_BASE, AMD64_BASE):
             self.assertIn(value, workflow + dockerfile + build)
-        self.assertIn("ADDON_VERSION: 0.21.1", workflow)
+        self.assertIn("ADDON_VERSION: 0.22.0", workflow)
+        self.assertIn("FIRMWARE_RELEASE_BINDING: pending", workflow)
         self.assertIn("BUILD_REVISION=${{ github.sha }}", workflow)
         self.assertIn("org.opencontainers.image.revision", dockerfile)
         self.assertIn("io.true-family.voice.poetry-lock-sha256", dockerfile)
@@ -99,13 +100,15 @@ class ReleaseHardeningTests(unittest.TestCase):
             "Download exact smoked image artifacts",
             "environment: backend-production",
             'description: "Exact 40-character candidate commit to publish"',
-            'description: "Household pilot only: verify exact installed firmware source without public release assets"',
+            'description: "Historical pilot switch; rejected when publishing 0.22.0"',
             'test "$GITHUB_SHA" = "$SOURCE_COMMIT"',
             "Refuse immutable version or source-tag overwrite",
             "docker manifest inspect",
             "github.event_name == 'workflow_dispatch' && inputs.publish",
             "Verify release artifact was published first",
             'test "$VERSION_MANIFEST" = "$SOURCE_MANIFEST"',
+            "Refuse release or publication while firmware binding is pending",
+            'test "$FIRMWARE_RELEASE_BINDING" = "finalized"',
         ):
             self.assertIn(term, workflow)
         self.assertNotIn(":latest", workflow)
@@ -145,10 +148,10 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("do not merge the version bump to `main` yet", release.lower())
         self.assertIn("only after the images exist", release.lower())
         self.assertIn("only then publish the github release", release.lower())
-        self.assertIn("pilot_firmware_source_only=true", release)
+        self.assertIn("pilot_firmware_source_only=false", release)
         self.assertIn("Release-event", release)
         self.assertIn(
-            "verification always requires the public firmware tag",
+            "verification enforces the same public binding",
             release,
         )
 
@@ -182,7 +185,7 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("backend first", docs)
         self.assertIn("firmware 0.19.0", docs)
         self.assertIn(
-            "backend microphone enrollment is deliberately absent from the 0.21",
+            "backend microphone enrollment is deliberately absent from the 0.22",
             configuration.lower(),
         )
         self.assertNotIn("enrollment_phrase", configuration)
@@ -249,6 +252,11 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("_single_owner_handle_audio_frame", transport)
         self.assertIn("_true_family_handle_audio_frame", transport)
         self.assertIn("_single_owner_audio_queue_put", transport)
+        self.assertIn("gracefully_finish_output_audio_generation", transport)
+        self.assertIn("_single_owner_write_frame", transport)
+        self.assertIn("finish_assistant_output_response", _read(
+            ADDON_ROOT / "app" / "websocket_handler.py"
+        ))
         self.assertNotIn("sender._resampler.resample", transport)
         self.assertIn("register_output_audio_source", transport)
         self.assertIn("_true_family_chunk_contexts", transport)

@@ -3,12 +3,22 @@ import base64
 import os
 import sys
 import asyncio
+import contextvars
 import inspect
 import json
 import logging
 import time
 from collections import deque
+from dataclasses import dataclass, field
 from typing import AbstractSet, Any, Optional
+
+
+_CURRENT_REALTIME_SESSION_GENERATION: contextvars.ContextVar[Optional[int]] = (
+    contextvars.ContextVar(
+        "true_family_realtime_session_generation",
+        default=None,
+    )
+)
 
 from app.logging_config import configure_production_logging
 
@@ -36,6 +46,7 @@ from app.room_light_tool import (
 )
 from app.end_conversation_tool import (
     END_CONVERSATION_TOOL_NAME,
+    SilentCloseResultProperties,
     get_end_conversation_tool_definition,
     register_end_conversation_tool,
 )
@@ -90,17 +101,51 @@ MEMORY_TOOL_NAMES = frozenset({"remember", "forget", "list_memories"})
 RESERVED_MCP_TOOL_NAMES = frozenset({"voice_enrollment"})
 DEFAULT_MAX_OUTPUT_TOKENS = 1200
 
+
+@dataclass
+class _DecisionOutputHold:
+    """Bounded output held only while a follow-up answer decision is unresolved."""
+
+    response_id: str
+    response_generation: int
+    user_item_id: str
+    user_item_sequence: int
+    audio_frames: list[Any] = field(default_factory=list)
+    text_events: list[tuple[str, Any]] = field(default_factory=list)
+    audio_bytes: int = 0
+    text_bytes: int = 0
+    audio_done: bool = False
+    released: bool = False
+    discarded: bool = False
+    started: bool = False
+    release_task: Optional[asyncio.Task] = None
+
+
+@dataclass(frozen=True)
+class _TerminalResponseLedger:
+    """Authoritative terminal facts used by the silent-close gate."""
+
+    response_id: str
+    response_generation: int
+    status: Optional[str]
+    output: tuple[dict[str, Any], ...]
+    decision_output_held: bool
+    physical_audio_released: bool
+    generated_audio_discarded: bool
+
 RAPID_PILOT_POLICY_MARKER = "RAPID-PILOT EXPLICIT FOLLOW-UP POLICY"
 RAPID_PILOT_POLICY_SUFFIX = f"""
 {RAPID_PILOT_POLICY_MARKER}: The microphone closes after every ordinary reply.
-Never ask an optional, rhetorical, confirmation, conversation-extending, or
-\"anything else?\" question. Only when the current request cannot be completed
-safely or sensibly without exactly one answer, call request_follow_up as the sole
-tool immediately before asking exactly one short necessary clarification. If the
-tool reports that follow-up is unavailable or requires a fresh wake, ask at most
-that one necessary question, stop, and preserve it in context. Never claim that
-the microphone is open and never mention this policy, the tool, protocol, window,
-timeout, or wake word.
+Whenever exactly one more user turn would usefully continue, clarify, personalize,
+or naturally complete the active conversation, call request_follow_up as the sole
+tool immediately before exactly one short question. You may repeat that sequence
+after each genuine relevant answer while the same physical wake remains valid. If
+the tool reports that follow-up is unavailable or requires a fresh wake, ask at
+most that one question, stop, and preserve it in context. If an answer received
+after request_follow_up is random or unrelated to the active conversation, call
+end_conversation as the sole tool and produce no spoken reply before or after it.
+Never claim that the microphone is open and never mention this policy, either
+tool, the protocol, window, timeout, or wake word.
 """.strip()
 
 logger = logging.getLogger(__name__)
@@ -115,19 +160,19 @@ def append_rapid_pilot_policy(instructions: str) -> str:
 
 
 def parse_rapid_pilot_follow_up_seconds(value: Any) -> int:
-    """Require the only supported 0.21.0 microphone mode."""
+    """Require the only supported 0.22.0 microphone mode."""
     if type(value) is int:
         seconds = value
     elif isinstance(value, str) and value.strip() == "0":
         seconds = 0
     else:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 exactly for the 0.21.0 rapid pilot; "
+            "follow_up_listen_seconds must be 0 exactly for the 0.22.0 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     if seconds != 0:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 for the 0.21.0 rapid pilot; "
+            "follow_up_listen_seconds must be 0 for the 0.22.0 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     return 0
@@ -141,11 +186,11 @@ def validate_rapid_pilot_prerequisites(
     """Keep startup mode, tool exposure, and policy prerequisites identical."""
     if turn_detection_type != "semantic_vad" or not backend_owned_response_creation:
         raise ValueError(
-            "The 0.21.0 rapid pilot requires managed semantic_vad response creation"
+            "The 0.22.0 rapid pilot requires managed semantic_vad response creation"
         )
     if max_context_messages <= 0:
         raise ValueError(
-            "The 0.21.0 rapid pilot requires max_context_messages greater than 0"
+            "The 0.22.0 rapid pilot requires max_context_messages greater than 0"
         )
 
 
@@ -157,7 +202,7 @@ def validate_selective_follow_up_media_scope(
     if request_follow_up_supported and not nearby_media_players:
         raise ValueError(
             "nearby_media_players must contain the exact Living Room TV and "
-            "Chromecast media_player entity IDs for the 0.21.0 rapid pilot"
+            "Chromecast media_player entity IDs for the 0.22.0 rapid pilot"
         )
 
 
@@ -248,6 +293,10 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
 
     SESSION_READY_TIMEOUT_S = 10.0
     CONVERSATION_ITEM_TIMEOUT_S = 5.0
+    DECISION_AUDIO_HOLD_TIMEOUT_S = 0.5
+    DECISION_AUDIO_HOLD_MAX_BYTES = 48000
+    DECISION_OUTPUT_HOLD_MAX_EVENTS = 512
+    MAX_SEEN_INPUT_SPEECH_ITEMS = 512
     RESPONSE_FINISHED_TIMEOUT_S = 60.0
     TURN_TERMINAL_TIMEOUT_S = 180.0
     TOOL_EXECUTION_LOCK_TIMEOUT_S = 10.0
@@ -269,6 +318,14 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             False,
         )
         self._managed_context = max_context_turns > 0
+        self._request_follow_up_answer_confirmed = kwargs.pop(
+            "request_follow_up_answer_confirmed",
+            None,
+        )
+        self._request_follow_up_answer_started = kwargs.pop(
+            "request_follow_up_answer_started",
+            None,
+        )
         super().__init__(*args, **kwargs)
         self._session_ready_event = asyncio.Event()
         self._session_generation = 0
@@ -313,6 +370,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         self._tool_call_details = {}
         self._tool_result_callbacks = {}
         self._tool_output_item_ids = {}
+        self._silent_tool_output_events = {}
         self._overlap_reservation_ids = set()
         self._overlap_deletions_drained = asyncio.Event()
         self._overlap_deletions_drained.set()
@@ -352,8 +410,23 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         self._request_follow_up_continuation_failed = None
         self._assistant_output_response_created = None
         self._assistant_output_frame_created = None
+        self._assistant_output_before_tool_continuation = None
+        self._silent_close_runtime_allowed = None
         self._output_response_generation = 0
         self._active_output_response_context = None
+        self._tool_call_output_contexts = {}
+        self._input_speech_sequence = 0
+        self._follow_up_answer_item_sequences = {}
+        self._seen_input_speech_items = {}
+        self._last_input_speech_start_ms = -1
+        self._input_speech_ledger_generation = self._session_generation
+        self._confirmed_follow_up_answer_identity = None
+        self._decision_output_hold: Optional[_DecisionOutputHold] = None
+        self._decision_output_lock = asyncio.Lock()
+        self._tool_call_response_contexts = {}
+        self._response_tool_call_ids = {}
+        self._terminal_response_ledgers = {}
+        self._terminal_response_events = {}
 
     @staticmethod
     def _item_dict(item):
@@ -424,10 +497,18 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         *,
         on_response_created=None,
         on_audio_frame=None,
+        on_before_tool_continuation=None,
     ) -> None:
         """Bind device output ownership to authoritative OpenAI responses."""
         self._assistant_output_response_created = on_response_created
         self._assistant_output_frame_created = on_audio_frame
+        self._assistant_output_before_tool_continuation = (
+            on_before_tool_continuation
+        )
+
+    def set_silent_close_runtime_authorizer(self, authorizer) -> None:
+        """Bind the device-owned final gate used before discarding held output."""
+        self._silent_close_runtime_allowed = authorizer
 
     def bind_context_aggregator(self, aggregator_pair) -> None:
         assistant = aggregator_pair.assistant()
@@ -645,33 +726,45 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         )
         await self.send_client_event(cancel_event)
 
-    async def _handle_evt_audio_delta(self, evt):  # type: ignore[override]
-        """Tag every PCM frame with its exact OpenAI response generation."""
-        context = self._active_output_response_context
-        if context is None or getattr(evt, "response_id", None) != context[0]:
+    def _begin_decision_output_hold(
+        self,
+        response_id: str,
+        response_generation: int,
+    ) -> None:
+        """Hold only the response to one freshly confirmed OPEN answer."""
+        context = (response_id, response_generation)
+        self._response_tool_call_ids[context] = set()
+        identity = self._confirmed_follow_up_answer_identity
+        self._confirmed_follow_up_answer_identity = None
+        if (
+            identity is None
+            or self._conversation_window.active_turn_id != identity[0]
+        ):
             return
-
-        from pipecat.frames.frames import TTSAudioRawFrame, TTSStartedFrame
-        from pipecat.services.openai.realtime.llm import CurrentAudioResponse
-
-        await self.stop_ttfb_metrics()
-        if not self._current_audio_response:
-            self._current_audio_response = CurrentAudioResponse(
-                item_id=evt.item_id,
-                content_index=evt.content_index,
-                start_time_ms=int(time.time() * 1000),
-            )
-            await self.push_frame(TTSStartedFrame())
-        audio = base64.b64decode(evt.delta)
-        self._current_audio_response.total_size += len(audio)
-        frame = TTSAudioRawFrame(
-            audio=audio,
-            sample_rate=24000,
-            num_channels=1,
+        if self._decision_output_hold is not None:
+            raise RuntimeError("a prior follow-up decision output is still active")
+        self._decision_output_hold = _DecisionOutputHold(
+            response_id=response_id,
+            response_generation=response_generation,
+            user_item_id=identity[0],
+            user_item_sequence=identity[1],
         )
+
+    def _decision_hold_matches(
+        self,
+        hold: _DecisionOutputHold,
+        context: Optional[tuple[str, int]],
+    ) -> bool:
+        return context == (hold.response_id, hold.response_generation)
+
+    async def _deliver_assistant_audio_frame(
+        self,
+        frame: Any,
+        context: tuple[str, int],
+    ) -> bool:
         registrar = self._assistant_output_frame_created
         if registrar is None:
-            return
+            return False
         try:
             registered = registrar(frame, *context)
             if inspect.isawaitable(registered):
@@ -683,10 +776,321 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                 "Assistant audio source registration failed (%s)",
                 error.__class__.__name__,
             )
-            return
+            return False
         if registered is not True:
-            return
+            return False
         await self.push_frame(frame)
+        return True
+
+    async def _release_decision_output_locked(
+        self,
+        hold: _DecisionOutputHold,
+    ) -> None:
+        """Release held PCM in order; caller serializes with new audio deltas."""
+        if hold.released or hold.discarded:
+            return
+        hold.released = True
+        task = hold.release_task
+        hold.release_task = None
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        frames = tuple(hold.audio_frames)
+        hold.audio_frames.clear()
+        text_events = tuple(hold.text_events)
+        hold.text_events.clear()
+        for event_type, event in text_events:
+            if event_type == "text":
+                await super()._handle_evt_text_delta(event)
+            else:
+                await super()._handle_evt_audio_transcript_delta(event)
+        if not frames:
+            return
+        from pipecat.frames.frames import TTSStartedFrame, TTSStoppedFrame
+
+        if not hold.started:
+            await self.push_frame(TTSStartedFrame())
+            hold.started = True
+        context = (hold.response_id, hold.response_generation)
+        for frame in frames:
+            if not await self._deliver_assistant_audio_frame(frame, context):
+                raise RuntimeError(
+                    "held assistant audio lost its physical output owner"
+                )
+        if hold.audio_done:
+            await self.push_frame(TTSStoppedFrame())
+
+    async def _expire_decision_output_hold(
+        self,
+        hold: _DecisionOutputHold,
+    ) -> None:
+        try:
+            await asyncio.sleep(self.DECISION_AUDIO_HOLD_TIMEOUT_S)
+            async with self._decision_output_lock:
+                if self._decision_output_hold is hold:
+                    await self._release_decision_output_locked(hold)
+        except asyncio.CancelledError:
+            return
+        except Exception as error:
+            self.begin_recovery()
+            await self.push_error(
+                error_msg=f"decision output release failed closed: {error!r}"
+            )
+
+    async def _finalize_decision_output(
+        self,
+        response_id: Optional[str],
+        response_generation: Optional[int],
+        status: Optional[str],
+        output: tuple[dict[str, Any], ...],
+    ) -> set[str]:
+        """Resolve held output and publish one immutable terminal tool ledger."""
+        if not response_id or response_generation is None:
+            return set()
+        context = (response_id, response_generation)
+        output_call_ids = {
+            str(item.get("call_id"))
+            for item in output
+            if item.get("type") == "function_call" and item.get("call_id")
+        }
+        tracked_call_ids = set(self._response_tool_call_ids.get(context, set()))
+        all_call_ids = tracked_call_ids | output_call_ids
+        exact_end_call_id = None
+        if (
+            status == "completed"
+            and len(output) == 1
+            and output[0].get("type") == "function_call"
+            and output[0].get("name") == END_CONVERSATION_TOOL_NAME
+            and output[0].get("call_id")
+        ):
+            exact_end_call_id = str(output[0]["call_id"])
+        exact_silent_candidate = (
+            exact_end_call_id is not None
+            and tracked_call_ids == {exact_end_call_id}
+            and END_CONVERSATION_TOOL_NAME in self._authorized_tool_names
+            and self._tool_call_details.get(exact_end_call_id)
+            == (END_CONVERSATION_TOOL_NAME, {})
+            and exact_end_call_id
+            in (self._scheduled_tool_call_ids | self._running_tool_call_ids)
+            and not (set(self._pending_function_calls) - {exact_end_call_id})
+            and not (
+                self._scheduled_tool_call_ids
+                - self._discarded_tool_result_ids
+                - {exact_end_call_id}
+            )
+            and not (self._running_tool_call_ids - {exact_end_call_id})
+            and self._silent_close_runtime_allowed is not None
+        )
+        if exact_silent_candidate:
+            try:
+                exact_silent_candidate = (
+                    self._silent_close_runtime_allowed() is True
+                )
+            except Exception:
+                exact_silent_candidate = False
+
+        decision_output_held = False
+        physical_audio_released = False
+        generated_audio_discarded = False
+        async with self._decision_output_lock:
+            hold = self._decision_output_hold
+            if hold is not None and self._decision_hold_matches(hold, context):
+                decision_output_held = True
+                if exact_silent_candidate and not hold.released:
+                    release_task = hold.release_task
+                    hold.release_task = None
+                    if (
+                        release_task is not None
+                        and release_task is not asyncio.current_task()
+                        and not release_task.done()
+                    ):
+                        release_task.cancel()
+                    generated_audio_discarded = bool(hold.audio_frames)
+                    hold.audio_frames.clear()
+                    hold.text_events.clear()
+                    hold.discarded = True
+                    self._current_audio_response = None
+                else:
+                    await self._release_decision_output_locked(hold)
+                physical_audio_released = hold.released
+                self._decision_output_hold = None
+
+        ledger = _TerminalResponseLedger(
+            response_id=response_id,
+            response_generation=response_generation,
+            status=status,
+            output=output,
+            decision_output_held=decision_output_held,
+            physical_audio_released=physical_audio_released,
+            generated_audio_discarded=generated_audio_discarded,
+        )
+        waiting_call_ids = all_call_ids & set(self._terminal_response_events)
+        for call_id in waiting_call_ids:
+            self._terminal_response_ledgers[call_id] = ledger
+        if not waiting_call_ids:
+            self._response_tool_call_ids.pop(context, None)
+        return waiting_call_ids
+
+    def _signal_terminal_response(self, call_ids: set[str]) -> None:
+        for call_id in call_ids:
+            event = self._terminal_response_events.get(call_id)
+            if event is not None and call_id in self._terminal_response_ledgers:
+                event.set()
+
+    async def end_conversation_is_sole_terminal_tool(self, tool_call_id: str) -> bool:
+        """Authorize silent close only after the exact response terminal ledger."""
+        context = self._tool_call_response_contexts.get(tool_call_id)
+        if (
+            context is None
+            or not self.request_follow_up_is_sole_tool(tool_call_id)
+            or self._tool_call_details.get(tool_call_id)
+            != (END_CONVERSATION_TOOL_NAME, {})
+            or END_CONVERSATION_TOOL_NAME not in self._authorized_tool_names
+        ):
+            return False
+        event = self._terminal_response_events.setdefault(
+            tool_call_id,
+            asyncio.Event(),
+        )
+        try:
+            await asyncio.wait_for(
+                event.wait(),
+                timeout=self.RESPONSE_FINISHED_TIMEOUT_S,
+            )
+        except TimeoutError:
+            return False
+        ledger = self._terminal_response_ledgers.get(tool_call_id)
+        if ledger is None or context != (
+            ledger.response_id,
+            ledger.response_generation,
+        ):
+            return False
+        return (
+            ledger.status == "completed"
+            and ledger.decision_output_held
+            and not ledger.physical_audio_released
+            and len(ledger.output) == 1
+            and ledger.output[0].get("type") == "function_call"
+            and ledger.output[0].get("name") == END_CONVERSATION_TOOL_NAME
+            and ledger.output[0].get("call_id") == tool_call_id
+            and self._response_tool_call_ids.get(context) == {tool_call_id}
+            and not (set(self._pending_function_calls) - {tool_call_id})
+            and not (
+                self._scheduled_tool_call_ids - self._discarded_tool_result_ids
+            )
+            and self._running_tool_call_ids == {tool_call_id}
+            and TURN_LIVENESS.in_flight == 1
+        )
+
+    async def _handle_evt_audio_delta(self, evt):  # type: ignore[override]
+        """Tag every PCM frame with its exact OpenAI response generation."""
+        context = self._active_output_response_context
+        if context is None or getattr(evt, "response_id", None) != context[0]:
+            return
+
+        from pipecat.frames.frames import TTSAudioRawFrame, TTSStartedFrame
+        from pipecat.services.openai.realtime.llm import CurrentAudioResponse
+
+        await self.stop_ttfb_metrics()
+        new_audio_response = not self._current_audio_response
+        if new_audio_response:
+            self._current_audio_response = CurrentAudioResponse(
+                item_id=evt.item_id,
+                content_index=evt.content_index,
+                start_time_ms=int(time.time() * 1000),
+            )
+        audio = base64.b64decode(evt.delta)
+        self._current_audio_response.total_size += len(audio)
+        frame = TTSAudioRawFrame(
+            audio=audio,
+            sample_rate=24000,
+            num_channels=1,
+        )
+        async with self._decision_output_lock:
+            hold = self._decision_output_hold
+            if (
+                hold is not None
+                and self._decision_hold_matches(hold, context)
+                and getattr(evt, "response_id", None) == hold.response_id
+                and not hold.released
+                and not hold.discarded
+            ):
+                hold.audio_frames.append(frame)
+                hold.audio_bytes += len(audio)
+                if hold.release_task is None:
+                    hold.release_task = self._track_turn_task(
+                        self._expire_decision_output_hold(hold)
+                    )
+                if (
+                    hold.audio_bytes + hold.text_bytes
+                    >= self.DECISION_AUDIO_HOLD_MAX_BYTES
+                    or len(hold.audio_frames) + len(hold.text_events)
+                    >= self.DECISION_OUTPUT_HOLD_MAX_EVENTS
+                ):
+                    await self._release_decision_output_locked(hold)
+                return
+            if new_audio_response:
+                await self.push_frame(TTSStartedFrame())
+            await self._deliver_assistant_audio_frame(frame, context)
+
+    async def _handle_evt_audio_done(self, evt):  # type: ignore[override]
+        context = self._active_output_response_context
+        if context is None or getattr(evt, "response_id", None) != context[0]:
+            return
+        async with self._decision_output_lock:
+            hold = self._decision_output_hold
+            if (
+                hold is not None
+                and self._decision_hold_matches(hold, context)
+                and getattr(evt, "response_id", None) == hold.response_id
+                and not hold.released
+                and not hold.discarded
+            ):
+                hold.audio_done = True
+                return
+        await super()._handle_evt_audio_done(evt)
+
+    async def _hold_decision_text_event(self, event_type: str, evt: Any) -> bool:
+        context = self._active_output_response_context
+        async with self._decision_output_lock:
+            hold = self._decision_output_hold
+            if (
+                hold is None
+                or not self._decision_hold_matches(hold, context)
+                or getattr(evt, "response_id", None) != hold.response_id
+                or hold.released
+                or hold.discarded
+            ):
+                return False
+            hold.text_events.append((event_type, evt))
+            hold.text_bytes += len(str(getattr(evt, "delta", "")).encode("utf-8"))
+            if hold.release_task is None:
+                hold.release_task = self._track_turn_task(
+                    self._expire_decision_output_hold(hold)
+                )
+            if (
+                hold.audio_bytes + hold.text_bytes
+                >= self.DECISION_AUDIO_HOLD_MAX_BYTES
+                or len(hold.audio_frames) + len(hold.text_events)
+                >= self.DECISION_OUTPUT_HOLD_MAX_EVENTS
+            ):
+                await self._release_decision_output_locked(hold)
+            return True
+
+    async def _handle_evt_text_delta(self, evt):  # type: ignore[override]
+        context = self._active_output_response_context
+        if context is None or getattr(evt, "response_id", None) != context[0]:
+            return
+        if await self._hold_decision_text_event("text", evt):
+            return
+        await super()._handle_evt_text_delta(evt)
+
+    async def _handle_evt_audio_transcript_delta(self, evt):  # type: ignore[override]
+        context = self._active_output_response_context
+        if context is None or getattr(evt, "response_id", None) != context[0]:
+            return
+        if await self._hold_decision_text_event("audio_transcript", evt):
+            return
+        await super()._handle_evt_audio_transcript_delta(evt)
 
     async def fail_interrupt_cancel(
         self,
@@ -733,6 +1137,25 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                 set(self._continuation_result_call_ids)
             )
         self._continuation_result_call_ids.clear()
+        self._tool_call_output_contexts.clear()
+        self._follow_up_answer_item_sequences.clear()
+        self._confirmed_follow_up_answer_identity = None
+        hold = self._decision_output_hold
+        self._decision_output_hold = None
+        if hold is not None:
+            hold.discarded = True
+            hold.audio_frames.clear()
+            hold.text_events.clear()
+            if hold.release_task is not None and not hold.release_task.done():
+                hold.release_task.cancel()
+        self._tool_call_response_contexts.clear()
+        self._response_tool_call_ids.clear()
+        self._terminal_response_ledgers.clear()
+        for terminal_event in self._terminal_response_events.values():
+            terminal_event.set()
+        self._terminal_response_events.clear()
+        for output_event in self._silent_tool_output_events.values():
+            output_event.set()
         current = asyncio.current_task()
         for task in list(self._turn_tasks):
             if task is not current and not task.done():
@@ -970,6 +1393,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             for call_id in removed_call_ids:
                 self._tool_call_generations.pop(call_id, None)
                 self._tool_call_details.pop(call_id, None)
+                self._tool_call_output_contexts.pop(call_id, None)
         logger.info(
             "✂️ pruned %s complete turn(s); %s retained",
             len(dropped),
@@ -1067,6 +1491,10 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                     )
 
     async def _handle_evt_conversation_item_added(self, evt):  # type: ignore[override]
+        event_generation = _CURRENT_REALTIME_SESSION_GENERATION.get()
+        if event_generation not in (None, self._session_generation):
+            logger.info("🔇 old-session conversation item suppressed")
+            return
         item = self._item_dict(evt.item)
         item_id = item.get("id")
         replayed = item_id in self._replay_item_ids
@@ -1086,15 +1514,40 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             logger.info("🔇 old-session conversation item suppressed during recovery")
             return
         manually_added = item_id in self._messages_added_manually
+        if (
+            item.get("type") == "message"
+            and item.get("role") == "user"
+            and isinstance(item_id, str)
+            and self._conversation_window.has_user_turn(item_id)
+        ):
+            logger.info("🔇 duplicate historical user item suppressed: %s", item_id)
+            return
         if item.get("type") == "function_call" and item.get("call_id"):
-            self._tool_call_generations[item["call_id"]] = self._session_generation
-            self._pending_function_calls.setdefault(item["call_id"], evt.item)
+            call_id = item["call_id"]
+            self._tool_call_generations[call_id] = self._session_generation
+            self._pending_function_calls.setdefault(call_id, evt.item)
+            output_context = self._active_output_response_context
+            if output_context is not None:
+                self._tool_call_response_contexts[call_id] = output_context
+                self._response_tool_call_ids.setdefault(
+                    output_context,
+                    set(),
+                ).add(call_id)
+                self._terminal_response_events.setdefault(
+                    call_id,
+                    asyncio.Event(),
+                )
         await self._call_event_handler(
             "on_conversation_item_created",
             item_id,
             evt.item,
         )
+        if event_generation not in (None, self._session_generation):
+            logger.info("🔇 raced old-session conversation item suppressed")
+            return
         async with self._history_lock:
+            if event_generation not in (None, self._session_generation):
+                return
             if self._messages_added_manually.get(item_id):
                 del self._messages_added_manually[item_id]
             elif (
@@ -1215,6 +1668,12 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                     )
             else:
                 self._conversation_window.observe_item(item)
+                if item.get("type") == "function_call_output":
+                    output_event = self._silent_tool_output_events.get(
+                        item.get("call_id")
+                    )
+                    if output_event is not None:
+                        output_event.set()
 
     async def _handle_evt_conversation_item_done(self, evt):  # type: ignore[override]
         item = self._item_dict(evt.item)
@@ -1234,13 +1693,33 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                 )
             ):
                 self._conversation_window.observe_item(item)
+                if item.get("type") == "function_call_output":
+                    output_event = self._silent_tool_output_events.get(
+                        item.get("call_id")
+                    )
+                    if output_event is not None:
+                        output_event.set()
             await super()._handle_evt_conversation_item_done(evt)
 
     async def handle_evt_input_audio_transcription_completed(self, evt):  # type: ignore[override]
+        event_generation = _CURRENT_REALTIME_SESSION_GENERATION.get()
+        if event_generation not in (None, self._session_generation):
+            logger.info("🔇 old-session transcript completion suppressed")
+            return
+        answer_sequence = self._follow_up_answer_item_sequences.pop(
+            evt.item_id,
+            None,
+        )
         if evt.item_id in self._discarded_user_item_ids:
             return
         async with self._history_lock:
             if self._managed_context:
+                if self._conversation_window.active_turn_id != evt.item_id:
+                    logger.info(
+                        "🔇 transcript for non-active historical item suppressed: %s",
+                        evt.item_id,
+                    )
+                    return
                 if not evt.transcript.strip():
                     self.begin_recovery()
                     await self.push_error(
@@ -1260,11 +1739,83 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                         evt.item_id,
                     )
                     return
+                if (
+                    answer_sequence is not None
+                    and self._seen_input_speech_items.get(evt.item_id, (None, None))[1]
+                    == answer_sequence
+                    and self._request_follow_up_answer_confirmed is not None
+                ):
+                    try:
+                        confirmed = self._request_follow_up_answer_confirmed(
+                            evt.item_id,
+                            answer_sequence,
+                            evt.transcript,
+                        )
+                        if confirmed is True:
+                            self._confirmed_follow_up_answer_identity = (
+                                evt.item_id,
+                                answer_sequence,
+                            )
+                    except Exception as error:
+                        self.begin_recovery()
+                        await self.push_error(
+                            error_msg=(
+                                "follow-up answer authority failed closed: "
+                                f"{error!r}"
+                            )
+                        )
+                        return
                 transcript_ready = self._transcript_ready_events.get(evt.item_id)
                 if transcript_ready is not None:
                     transcript_ready.set()
                 return
             await super().handle_evt_input_audio_transcription_completed(evt)
+
+    async def _handle_evt_speech_started(self, evt):  # type: ignore[override]
+        """Bind a follow-up grant to the exact Realtime speech item that opened it."""
+        item_id = getattr(evt, "item_id", None)
+        audio_start_ms = getattr(evt, "audio_start_ms", None)
+        event_generation = _CURRENT_REALTIME_SESSION_GENERATION.get()
+        fresh_identity = (
+            isinstance(item_id, str)
+            and bool(item_id)
+            and type(audio_start_ms) is int
+            and audio_start_ms >= 0
+            and event_generation in (None, self._session_generation)
+            and not self._recovery_active
+            and self._input_speech_ledger_generation == self._session_generation
+            and item_id not in self._seen_input_speech_items
+            and not self._conversation_window.has_user_turn(item_id)
+            and audio_start_ms > self._last_input_speech_start_ms
+        )
+        if not fresh_identity:
+            logger.info("🔇 stale or malformed speech-start item suppressed")
+            return
+        turn_was_active = self._conversation_window.active_turn_id is not None
+        self._input_speech_sequence += 1
+        sequence = self._input_speech_sequence
+        self._last_input_speech_start_ms = audio_start_ms
+        self._seen_input_speech_items[item_id] = (audio_start_ms, sequence)
+        while len(self._seen_input_speech_items) > self.MAX_SEEN_INPUT_SPEECH_ITEMS:
+            oldest_item_id = next(iter(self._seen_input_speech_items))
+            self._seen_input_speech_items.pop(oldest_item_id, None)
+        await super()._handle_evt_speech_started(evt)
+        if (
+            turn_was_active
+            or self._recovery_active
+            or event_generation not in (None, self._session_generation)
+            or self._request_follow_up_answer_started is None
+        ):
+            return
+        try:
+            if self._request_follow_up_answer_started(item_id, sequence) is True:
+                self._follow_up_answer_item_sequences.clear()
+                self._follow_up_answer_item_sequences[item_id] = sequence
+        except Exception as error:
+            self.begin_recovery()
+            await self.push_error(
+                error_msg=f"follow-up answer identity failed closed: {error!r}"
+            )
 
     async def _handle_evt_speech_stopped(self, evt):  # type: ignore[override]
         if self._managed_context and self._conversation_window.active_turn_id:
@@ -1725,10 +2276,29 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                             or generation != self._session_generation
                         ):
                             return
-                        self._response_finished.clear()
                         continuation_call_ids = set(
                             self._continuation_result_call_ids
                         )
+                        if self._assistant_output_before_tool_continuation is not None:
+                            output_contexts = {
+                                self._tool_call_output_contexts.get(call_id)
+                                for call_id in continuation_call_ids
+                            }
+                            if None in output_contexts or len(output_contexts) != 1:
+                                raise RuntimeError(
+                                    "tool continuation lost its output response owner"
+                                )
+                            output_context = output_contexts.pop()
+                            drained = self._assistant_output_before_tool_continuation(
+                                *output_context
+                            )
+                            if inspect.isawaitable(drained):
+                                drained = await drained
+                            if drained is not True:
+                                raise RuntimeError(
+                                    "tool continuation audio did not drain safely"
+                                )
+                        self._response_finished.clear()
                         follow_up_armed = False
                         if self._request_follow_up_continuation_arm is not None:
                             follow_up_armed = bool(
@@ -1757,6 +2327,8 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                         self._continuation_result_call_ids.difference_update(
                             continuation_call_ids
                         )
+                        for call_id in continuation_call_ids:
+                            self._tool_call_output_contexts.pop(call_id, None)
                         break
         except asyncio.CancelledError:
             raise
@@ -1772,6 +2344,82 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                 if self._continuation_requested and not self._recovery_active:
                     self._continuation_requested = False
                     await self._create_response()
+
+    async def _finalize_silent_control_result(
+        self,
+        call_id: str,
+        generation: int,
+    ) -> None:
+        """Send one tool result without response.create and close its managed turn."""
+        output_event = asyncio.Event()
+        self._silent_tool_output_events[call_id] = output_event
+        succeeded = False
+        try:
+            if (
+                not self._managed_context
+                or self._context is None
+                or self._recovery_active
+                or generation != self._session_generation
+                or call_id not in self._pending_tool_result_ids
+                or call_id in self._discarded_tool_result_ids
+                or call_id in self._interrupted_tool_result_ids
+            ):
+                raise RuntimeError("silent control lost its current session owner")
+            result_message = next(
+                (
+                    message
+                    for message in reversed(self._context.get_messages())
+                    if message.get("role") == "tool"
+                    and message.get("tool_call_id") == call_id
+                ),
+                None,
+            )
+            if result_message is None:
+                raise RuntimeError("silent control result was not aggregated")
+            content = result_message.get("content")
+            if not isinstance(content, str):
+                content = json.dumps(content, separators=(",", ":"))
+            await self._send_tool_result(call_id, content)
+            await asyncio.wait_for(
+                output_event.wait(),
+                timeout=self.CONVERSATION_ITEM_TIMEOUT_S,
+            )
+            async with self._history_lock:
+                if (
+                    self._recovery_active
+                    or generation != self._session_generation
+                    or not self._conversation_window.finish_silent_control(
+                        call_id,
+                        END_CONVERSATION_TOOL_NAME,
+                    )
+                ):
+                    raise RuntimeError(
+                        "silent control did not finish an exact replayable turn"
+                    )
+                self._sync_local_context()
+            self._completed_tool_calls.add(call_id)
+            succeeded = True
+        except asyncio.CancelledError:
+            self._discarded_tool_result_ids.add(call_id)
+            self._completed_tool_calls.add(call_id)
+            raise
+        except Exception as error:
+            self._discarded_tool_result_ids.add(call_id)
+            self._completed_tool_calls.add(call_id)
+            self.begin_recovery()
+            await self.push_error(
+                error_msg=f"silent conversation close failed closed: {error!r}"
+            )
+        finally:
+            if self._silent_tool_output_events.get(call_id) is output_event:
+                self._silent_tool_output_events.pop(call_id, None)
+            self._pending_tool_result_ids.discard(call_id)
+            self._continuation_result_call_ids.discard(call_id)
+            self._tool_call_output_contexts.pop(call_id, None)
+            if not self._pending_tool_result_ids:
+                self._pending_tool_results_drained.set()
+            if succeeded or self._recovery_active:
+                self._turn_terminal.set()
 
     async def _handle_context(self, context):  # type: ignore[override]
         """Consume old tool results without allowing a post-recovery reply."""
@@ -1850,10 +2498,16 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
 
     async def _handle_evt_response_done(self, evt):  # type: ignore[override]
         response_id = getattr(evt.response, "id", None)
+        response_output = tuple(
+            self._item_dict(item) for item in evt.response.output
+        )
+        completed_output_context = None
+        terminal_call_ids: set[str] = set()
         if (
             self._active_output_response_context is not None
             and self._active_output_response_context[0] == response_id
         ):
+            completed_output_context = self._active_output_response_context
             self._active_output_response_context = None
         if self._recovery_active:
             self._response_interrupt_generations.pop(response_id, None)
@@ -1875,6 +2529,45 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         if response_id is None and self._interrupted_response_active:
             interrupt_generation = self._interrupted_response_generation
         interrupted_response = interrupt_generation is not None
+        if (
+            completed_output_context is not None
+            and response_was_active
+            and not interrupted_response
+        ):
+            terminal_call_ids = await self._finalize_decision_output(
+                response_id,
+                completed_output_context[1],
+                getattr(evt.response, "status", None),
+                response_output,
+            )
+        elif completed_output_context is not None:
+            async with self._decision_output_lock:
+                hold = self._decision_output_hold
+                if (
+                    hold is not None
+                    and self._decision_hold_matches(
+                        hold,
+                        completed_output_context,
+                    )
+                ):
+                    hold.discarded = True
+                    hold.audio_frames.clear()
+                    hold.text_events.clear()
+                    if hold.release_task is not None and not hold.release_task.done():
+                        hold.release_task.cancel()
+                    self._decision_output_hold = None
+                    self._current_audio_response = None
+        if (
+            completed_output_context is not None
+            and response_was_active
+            and not interrupted_response
+        ):
+            for item in response_output:
+                call_id = item.get("call_id")
+                if item.get("type") == "function_call" and call_id:
+                    self._tool_call_output_contexts[call_id] = (
+                        completed_output_context
+                    )
         if response_id == self._active_response_id:
             self._active_response_id = None
         process_aggregator_end = response_was_active or (
@@ -1889,7 +2582,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             )
         ) and not any(
             self._item_dict(item).get("role") == "assistant"
-            for item in evt.response.output
+            for item in response_output
         ):
             # Managed response.create bypasses Pipecat's client-side start frame.
             # Assistant messages provide their own start on item.added, but a
@@ -1903,7 +2596,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             turn_ended = (
                 self._conversation_window.finish_response(
                     evt.response.status,
-                    [self._item_dict(item) for item in evt.response.output],
+                    list(response_output),
                     continuation_pending=self._continuation_pending(),
                     continuable_call_ids=(
                         self._running_tool_call_ids
@@ -1962,8 +2655,8 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                     self._response_finished.set()
                     self._managed_response_sent = False
         if interrupted_response:
-            for item in evt.response.output:
-                item_id = self._item_dict(item).get("id")
+            for item in response_output:
+                item_id = item.get("id")
                 if item_id:
                     self._interrupted_item_ids.add(str(item_id))
             self._post_interrupt_response_quarantine = True
@@ -1976,8 +2669,8 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         if not self._managed_context and response_was_active:
             self._unmanaged_active_item_ids.update(
                 str(item_id)
-                for item in evt.response.output
-                if (item_id := self._item_dict(item).get("id"))
+                for item in response_output
+                if (item_id := item.get("id"))
             )
         if unreplayable_terminal:
             self.begin_recovery()
@@ -1992,11 +2685,12 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             or self._scheduled_tool_call_ids
             or self._pending_tool_result_ids
             or any(
-                self._item_dict(item).get("type") == "function_call"
-                for item in evt.response.output
+                item.get("type") == "function_call"
+                for item in response_output
             )
         ):
             self._unmanaged_active_item_ids.clear()
+        self._signal_terminal_response(terminal_call_ids)
 
     async def _replay_history(
         self,
@@ -2189,8 +2883,16 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             self._running_tool_call_ids.clear()
             self._running_tool_calls_drained.set()
             self._tool_call_details.clear()
+            self._tool_call_output_contexts.clear()
+            self._follow_up_answer_item_sequences.clear()
+            self._seen_input_speech_items.clear()
+            self._last_input_speech_start_ms = -1
+            self._confirmed_follow_up_answer_identity = None
             self._tool_result_callbacks.clear()
             self._tool_output_item_ids.clear()
+            for output_event in self._silent_tool_output_events.values():
+                output_event.set()
+            self._silent_tool_output_events.clear()
 
         if self._context is None:
             from pipecat.processors.aggregators.llm_context import LLMContext
@@ -2200,6 +2902,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         await self._process_completed_function_calls(send_new_results=False)
 
         self._session_generation += 1
+        self._input_speech_ledger_generation = self._session_generation
         target_generation = self._session_generation
         self._api_session_ready = False
         self._accept_session_ready = True
@@ -2326,15 +3029,34 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         if not self._running_tool_call_ids:
             self._running_tool_calls_drained.set()
         self._tool_result_callbacks.pop(tool_call_id, None)
+        response_context = self._tool_call_response_contexts.pop(
+            tool_call_id,
+            None,
+        )
+        if response_context is not None:
+            response_calls = self._response_tool_call_ids.get(response_context)
+            if response_calls is not None:
+                response_calls.discard(tool_call_id)
+                if not response_calls:
+                    self._response_tool_call_ids.pop(response_context, None)
+        self._terminal_response_ledgers.pop(tool_call_id, None)
+        self._terminal_response_events.pop(tool_call_id, None)
         if tool_call_id not in self._discarded_tool_result_ids:
             self._tool_call_generations.pop(tool_call_id, None)
             self._tool_call_details.pop(tool_call_id, None)
 
     def request_follow_up_is_sole_tool(self, tool_call_id: str) -> bool:
         """Require this call to be the only active or queued tool result."""
+        response_context = self._tool_call_response_contexts.get(tool_call_id)
         return (
             TURN_LIVENESS.in_flight == 1
             and self._running_tool_call_ids == {tool_call_id}
+            and not (set(self._pending_function_calls) - {tool_call_id})
+            and (
+                response_context is None
+                or self._response_tool_call_ids.get(response_context)
+                == {tool_call_id}
+            )
             and not (
                 self._scheduled_tool_call_ids - self._discarded_tool_result_ids
             )
@@ -2395,6 +3117,24 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                 # before its callback returns, so retrying would duplicate it.
                 result_reported = True
                 try:
+                    if isinstance(properties, SilentCloseResultProperties):
+                        if function_name != END_CONVERSATION_TOOL_NAME:
+                            raise RuntimeError(
+                                "run_llm=False is reserved for end_conversation"
+                            )
+                        original_context_callback = properties.on_context_updated
+
+                        async def finalize_silent_context() -> None:
+                            if original_context_callback is not None:
+                                await original_context_callback()
+                            await self._finalize_silent_control_result(
+                                params.tool_call_id,
+                                call_generation,
+                            )
+
+                        properties = SilentCloseResultProperties(
+                            on_context_updated=finalize_silent_context,
+                        )
                     await original_result_callback(result, properties=properties)
                 except BaseException as error:
                     self._pending_tool_result_ids.discard(params.tool_call_id)
@@ -2643,8 +3383,19 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         """
         from pipecat.services.openai.realtime import events
 
+        receive_generation = self._session_generation
+        receive_websocket = self._websocket
+        event_context_token = _CURRENT_REALTIME_SESSION_GENERATION.set(
+            receive_generation
+        )
         try:
             async for message in self._websocket:
+                if (
+                    receive_generation != self._session_generation
+                    or receive_websocket is not self._websocket
+                ):
+                    logger.info("🔇 stale Realtime reader event suppressed")
+                    return
                 evt = events.parse_server_event(message)
                 if evt.type == "session.created":
                     await self._handle_evt_session_created(evt)
@@ -2706,6 +3457,12 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                                 result = await result
                             if result is False:
                                 self._active_output_response_context = None
+                                self._confirmed_follow_up_answer_identity = None
+                        if (
+                            output_context is not None
+                            and self._active_output_response_context == output_context
+                        ):
+                            self._begin_decision_output_hold(*output_context)
                         if self._request_follow_up_response_created is not None:
                             self._request_follow_up_response_created(response_id)
                 elif evt.type == "conversation.item.added":
@@ -2786,6 +3543,8 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         except Exception as e:
             await self.push_error(error_msg=f"realtime receive loop died: {e!r}")
             return
+        finally:
+            _CURRENT_REALTIME_SESSION_GENERATION.reset(event_context_token)
         # Loop ended without an exception: a clean server-side close, or the
         # fatal-error path (which already pushed its own ErrorFrame —
         # duplicates collapse in ConnectionRecovery's cooldown/guard).
@@ -2937,7 +3696,7 @@ class Application:
             os.environ.get("ENABLE_VOICE_MEMORY", "false").lower() == "true"
         )
         
-        # Version 0.21.0 is the explicit two-phase pilot. Legacy automatic mode
+        # Version 0.22.0 is the serial explicit-follow-up pilot. Automatic mode
         # is intentionally rejected rather than silently changing saved intent.
         follow_up_listen_seconds = parse_rapid_pilot_follow_up_seconds(
             os.environ.get("FOLLOW_UP_LISTEN_SECONDS", "0")
@@ -3175,7 +3934,7 @@ class Application:
 
     def _register_conversation_control_tool(self) -> None:
         # MCP registers every returned handler, including hidden collisions.
-        # Remove both reserved names, then install exactly the active native one.
+        # Remove both reserved names, then install the native control pair.
         if self.openai_service is None or self.websocket_handler is None:
             raise RuntimeError("Conversation control dependencies are unavailable")
         for tool_name in CONVERSATION_CONTROL_TOOL_NAMES:
@@ -3188,7 +3947,22 @@ class Application:
                 self.websocket_handler.cancel_request_follow_up,
                 self.openai_service.request_follow_up_is_sole_tool,
             )
-            logger.info("✅ Registered explicit request_follow_up tool")
+            async def end_conversation_is_safe(tool_call_id: str) -> bool:
+                return (
+                    await self.openai_service.end_conversation_is_sole_terminal_tool(
+                        tool_call_id
+                    )
+                    and self.websocket_handler.silent_close_is_allowed()
+                )
+
+            register_end_conversation_tool(
+                self.openai_service,
+                self.websocket_handler.request_silent_close,
+                end_conversation_is_safe,
+            )
+            logger.info(
+                "✅ Registered explicit request_follow_up and end_conversation tools"
+            )
             return
         logger.warning(
             "⚠️ request_follow_up disabled because response creation is not "
@@ -3261,11 +4035,12 @@ class Application:
             # Authoritative ON sequences for approved mixed Zigbee room groups.
             all_tools.append(get_room_light_tool_definition())
 
-            # Automatic follow-up mode exposes graceful close; closed-by-default
-            # mode instead exposes one explicit, drain-safe follow-up request.
+            # Closed-by-default mode exposes explicit follow-up and silent-close
+            # controls. Both are native and must run as the sole tool.
             conversation_control = self._get_conversation_control_tool_definition()
             if conversation_control is not None:
                 all_tools.append(conversation_control)
+                all_tools.append(get_end_conversation_tool_definition())
 
             all_tools.append(get_false_alarm_tool_definition())
             all_tools.extend(get_timer_tool_definitions())
@@ -3440,6 +4215,16 @@ class Application:
                 ),
                 server_vad_interrupt_response=self.interrupt_response,
                 authorized_tool_names=session_tool_names,
+                request_follow_up_answer_confirmed=(
+                    self.websocket_handler.confirm_request_follow_up_answer
+                    if self.request_follow_up_supported
+                    else None
+                ),
+                request_follow_up_answer_started=(
+                    self.websocket_handler.bind_request_follow_up_answer
+                    if self.request_follow_up_supported
+                    else None
+                ),
             )
             logger.info(f"✅ OpenAI Service created: {type(self.openai_service).__name__}")
             

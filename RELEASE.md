@@ -2,18 +2,24 @@
 
 ## Compatibility Order
 
-Version 0.21.1 is a coordinated protocol release and requires Voice PE firmware
-0.19.0 or newer.
+Version 0.22.0 is currently a source-only candidate. Its exact Voice PE firmware
+source commit and release-artifact hashes are **pending**. Do not build, publish,
+tag, install, or deploy it until that binding is finalized and reviewed.
 
-> **Upgrade firmware first.** Keep the existing backend running, update and
-> verify the device firmware, then update the backend to 0.21.1. Starting the
-> 0.21.1 backend against older firmware is unsupported and must not be used as a
-> rollout shortcut.
+The workflow records `FIRMWARE_RELEASE_BINDING: pending` and deliberately fails
+every publication or release event. The immutable firmware 0.19.0 values retained
+in this repository are regression-test evidence for the last release, not the
+0.22.0 release binding and not deployment authorization.
+
+> **Upgrade firmware first after the binding is finalized.** Keep the existing
+> backend running, update and verify the exact firmware named by the future
+> 0.22.0 release binding, then update the backend. Starting backend 0.22.0 before
+> that binding exists is unsupported.
 
 > **Rollback the backend first.** Keep the newer firmware running, roll the
 > backend back to the previously compatible version and verify reconnection,
-> then roll back firmware if still necessary. Rolling firmware back while the
-> 0.21.1 backend is running reverses the safe compatibility order.
+> then roll back firmware if still necessary. Rolling firmware back while a
+> newer backend is running reverses the safe compatibility order.
 
 ## Published Artifact
 
@@ -43,8 +49,8 @@ Only after those checks does CI save and hash the exact image. A protected
 publication job loads that saved image, verifies the image ID and archive hash,
 and pushes it without rebuilding.
 
-The backend's read-only protocol fixture is aligned to the final firmware
-`0.19.0` artifact: manifest SHA-256
+The backend's read-only regression fixture remains aligned to the historical
+firmware `0.19.0` artifact: manifest SHA-256
 `b9b12d87346148d5260a53d6303eb8c44ffb3cd24d6eb5c1a0017baccdc3a9d3`, factory
 SHA-256 `7f0ffaeaecb861ceb342ad571501b14c6017161bbb6d90f489002ae4271f6b14`,
 and OTA SHA-256
@@ -55,27 +61,81 @@ and the exact `SHA256SUMS` file SHA-256 is
 `fb4f71aebb6556ca6b6f659832943c698400f62cb9ee44bc1a10b2f5894050ce`.
 The firmware artifact is not copied into or modified by this repository.
 
-Normal backend CI checks out the exact public firmware `0.19.0` tag and
-downloads the release's actual `manifest.json`, binaries, ELF, and
-`SHA256SUMS`. It validates source-level protocol shapes, every package member,
-the package manifest version, and the exact published `SHA256SUMS` bytes.
-Missing source, missing release assets, a source/version/protocol mismatch, or
-any artifact hash mismatch fails CI. A standalone local test run may use
-the committed fixture when those external inputs are absent; CI sets
-`TRUE_FAMILY_VOICE_REQUIRE_FIRMWARE_VALIDATION=1`, so release validation cannot
-skip either source or artifact checks.
+Normal source CI checks out the historical firmware `0.19.0` commit and validates
+the source-level protocol shapes as a regression gate. A standalone local test
+run may use the committed fixture when external inputs are absent. This evidence
+does not satisfy the 0.22.0 release gate; release and publication remain blocked
+until the fixture, workflow, and documentation carry a separately reviewed exact
+0.22.0 firmware source and artifact binding.
 
-The household RAPID-PILOT image gate is narrower and cannot authorize a public
-GitHub release. An explicit manual dispatch with
-`pilot_firmware_source_only=true` checks out installed firmware source commit
-`bcb3bf4cbf181397b51aa7cc5bca5cfecefc7b3a`, runs the complete backend and
-source-level protocol suite, and still requires both architecture image smokes.
-Only the protected GHCR image publication may use this path. Release-event
-verification always requires the public firmware tag and exact release assets.
+The historical `pilot_firmware_source_only` workflow input is retained for
+auditability but cannot authorize a 0.22.0 image or public GitHub release. Every
+0.22.0 publication requires `pilot_firmware_source_only=false`, a finalized public
+firmware source commit, and every exact release-artifact hash. Release-event
+verification enforces the same public binding.
+
+## Follow-Up Transaction Authenticity
+
+The future compatible firmware binding must implement the fixture's exact
+`follow_up_progress_phase` shape: `type`, `value`, `token`, `session_nonce`, and
+`wake_generation`. Initial physical-wake phases retain the existing trusted
+four-field shape, and the historical two-field phase remains regression-only.
+The backend emits tokenized `listening`, `thinking`, and `replying` progression
+only for the current answer to an OPEN follow-up transaction. Terminal `idle` is
+always tokenless and a token-bearing terminal phase is rejected. Phase authority
+also expires at the 120-second physical-wake ceiling, during silent close, or
+after its captured wake or local transaction epoch changes. The presently
+available sibling firmware source does not implement this final shape, which is
+an additional reason the release stays blocked while
+`FIRMWARE_RELEASE_BINDING` is `pending`.
+
+Answer acceptance also requires the exact fresh OpenAI speech-start item ID and
+its monotonic local sequence before that same item's nonblank transcript can
+confirm the follow-up. Delayed historical transcripts, duplicate completion,
+recovery, socket replacement, and a new physical wake cannot confer authority on
+a later round.
+
+## Silent Terminal Decision Gate
+
+For the response to one freshly confirmed follow-up answer, backend 0.22.0 holds
+text, audio transcript, and PCM for at most 500 ms or 48,000 PCM bytes. Normal
+speech is released after that bound; a separate 512-event cap prevents
+zero-length delta floods from bypassing the memory limit. Held output is
+discarded only after
+`response.done` proves one completed response with exactly one authorized
+`end_conversation` call, no mixed or pending tool work, and a still-current
+device-owned close grant. Tool execution then waits on that immutable terminal
+ledger before sending the silent close result.
+
+Every failed precondition releases the held output through the normal response
+path. Recovery discards the hold and retires the physical output generation
+immediately. This gate does not depend on prompting or on receiving tool-call
+events before audio deltas.
+
+## Response-Generation Audio Barrier
+
+Backend 0.22.0 binds each assistant PCM source frame, Pipecat chunker operation,
+queued chunk, adapter-owned partial buffer, and active WebSocket write to the exact admitted
+socket and `(response_id, response_generation)`. A tool continuation waits for
+response A to finish before it arms a follow-up or creates response B. The drain
+may pad and send at most one final partial PCM chunk; it never truncates the last
+words merely because `response.done` arrived before Pipecat completed playback.
+
+The wait does not hold the socket/session transition lock. Stop, mute,
+disconnect, socket replacement, recovery, wake expiry, timeout, serializer
+failure, and physical WebSocket write failure retire response A and discard its
+queued or partial audio. No audio from an old generation may cross into a new
+physical owner. A new generation also waits for old in-flight source processing;
+if processing or a WebSocket write resists bounded cancellation, the transport
+retires that socket before allowing another owner or generation. A failed or
+expired graceful finish settles its generation before the handler releases the
+response grant; a cancellation-resistant physical write therefore forces
+owner detachment and socket close or abort before failure returns, and no tool
+continuation may create response B on that path.
 
 ## Accepted Rapid-Pilot Privileges
 
-Version 0.21.1 deliberately inherits the pilot's `host_network: true`,
+Version 0.22.0 deliberately inherits the pilot's `host_network: true`,
 `homeassistant_api: true`, and read-write `/share` mount. These remain accepted
 deployment risks, not reduced-sandbox claims: a backend compromise can reach the
 host network, use the add-on's Home Assistant API credential, and alter the
@@ -100,11 +160,15 @@ build, not the release artifact consumed by normal installations.
 
 ## Publication Order
 
+Publication is currently blocked. Do not execute this sequence while
+`FIRMWARE_RELEASE_BINDING` is `pending`.
+
 1. Commit the exact release candidate on a reviewed release branch and let its
    normal CI pass. Do not merge the version bump to `main` yet.
 2. Manually dispatch **Build and Publish Home Assistant Addon** from that exact
-   candidate commit with `publish=true`, `release_tag=v0.21.1`, and
-   `source_commit=<the same 40-character commit>`.
+   candidate commit with `publish=true`, `release_tag=v0.22.0`, and
+   `source_commit=<the same 40-character commit>`. Keep
+   `pilot_firmware_source_only=false`.
 3. Approve its protected `backend-production` environment gate only after both
    architecture build-and-smoke jobs pass.
 4. Record both architecture image digests printed by the workflow.
@@ -112,10 +176,10 @@ build, not the release artifact consumed by normal installations.
    digests.
 6. Only after the images exist, merge the identical candidate source to `main`.
    This is the step that exposes the repository update to Home Assistant users.
-7. Tag the reviewed candidate commit `v0.21.1`; only then publish the GitHub release.
+7. Tag the reviewed candidate commit `v0.22.0`; only then publish the GitHub release.
    The release event is verification-only and must not build or push an image.
 
-The publication workflow refuses to overwrite either an existing `0.21.1` tag
+The publication workflow refuses to overwrite either an existing `0.22.0` tag
 or its source-commit tag. A partially published failed run must be investigated;
 do not delete or replace a successful architecture tag without treating that as
 a new release version.

@@ -21,6 +21,13 @@ TRUSTED_BACKEND_TO_DEVICE_FIELDS = {
     "commit_follow_up": ("type", "token", "session_nonce", "ready_nonce"),
     "ack": ("type", "session_nonce", "wake_generation"),
     "phase": ("type", "value", "session_nonce", "wake_generation"),
+    "follow_up_progress_phase": (
+        "type",
+        "value",
+        "token",
+        "session_nonce",
+        "wake_generation",
+    ),
     "prepare_suppress_followup": ("type", "token"),
     "commit_suppress_followup": ("type", "token"),
     "cancel_suppress_followup": ("type", "token"),

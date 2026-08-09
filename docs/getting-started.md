@@ -8,11 +8,11 @@ A complete, from-zero walkthrough. You'll set up two halves:
 Plan ~30–45 minutes the first time. Later firmware updates require deliberately
 advancing the two pinned release references after reviewing the new release.
 
-> **Mandatory 0.21 order:** firmware 0.19.0 or newer must be installed and
-> verified before backend 0.21.0 is started. During an upgrade, leave the old
-> backend running while firmware updates, then update the backend. During a
-> rollback, roll back the backend first and firmware second. Do not reverse
-> either order.
+> **0.22.0 is source-only and must not be deployed yet.** Its exact firmware
+> source commit and release-artifact hashes are pending, and CI blocks
+> publication. Keep using released backend 0.21.1 with firmware 0.19.0. Once the
+> new binding is finalized, update firmware first and backend second. Roll back
+> backend first and firmware second.
 
 ```
 Home Assistant Voice PE          Home Assistant (your box)             Cloud
@@ -84,7 +84,7 @@ state?" tool — keep it; it's what answers *"is the light on?"*.
 
 ### 1.4 Minimal configuration
 
-Before the first 0.21.0 run, configure all required authority and media fences:
+Before the first run, configure all required authority and media fences:
 
 | Option | Value |
 |---|---|
@@ -96,11 +96,11 @@ Before the first 0.21.0 run, configure all required authority and media fences:
 Everything else can wait. The full reference — every option, its default, and when
 to change it — is in the [Configuration Reference](configuration.md).
 
-### 1.5 Leave 0.21.0 stopped until firmware is ready
+### 1.5 Do not deploy the 0.22.0 source candidate
 
-Save the configuration, but do **not** start backend 0.21.0 yet. Complete the
-firmware update below first. This is a protocol compatibility requirement, not
-an optional troubleshooting preference.
+Save the configuration, but do **not** install or start backend 0.22.0. Its exact
+firmware binding is not finalized. The firmware steps below remain the released
+0.21.1 path until Release Safety names the reviewed 0.22.0 inputs.
 
 ---
 
@@ -189,10 +189,12 @@ Two of these confuse people, so to be clear:
 
 The device now boots with compatible firmware and waits for the backend.
 
-### 2.5 Start the backend
+### 2.5 Start the released backend
 
-Only after the firmware update succeeds, click **Start** on the add-on and open
-the **Log** tab. A healthy start shows `✅ Fetched N MCP tools` and
+These steps apply to released backend 0.21.1 only. Do not start the 0.22.0 source
+candidate. Only after the released firmware update succeeds, click **Start** on
+the add-on and open the **Log** tab. A healthy start shows
+`✅ Fetched N MCP tools` and
 `Creating session with N tools` (with `Hass*` names). The add-on listens on port
 **8080**, and the device can now connect.
 
@@ -207,11 +209,11 @@ the **Log** tab. A healthy start shows `✅ Fetched N MCP tools` and
    → a wake chime plays and the ring shows **listening**.
 3. Ask for something you exposed, e.g. *"turn on the bedroom lamp"* → the ring shows
    **thinking** → it acts and replies.
-4. Ordinary replies close the mic. If the assistant must ask one necessary
-   question, it can open one no-wake follow-up window for that physical wake;
-otherwise say the wake word again. Missing, active, or uncertain nearby media
-scope keeps even
-   that one window closed, while the conversation remains ready after re-waking.
+4. Ordinary replies close the mic. In 0.22.0, the assistant may request one
+   useful no-wake question at a time and continue again after each genuine
+   answer within the same 120-second physical wake. Missing, active, or uncertain
+   nearby media keeps each requested window closed while conversation context
+   remains available after re-waking.
 5. To interrupt a reply: say **"stop"** or press the **center button**.
 
 **If something's off, check the logs:**
@@ -248,7 +250,7 @@ Once the basics work, the fun starts. Each of these has a full guide in
   See [Persona & voices](features.md#persona--voices).
 - **Speaker recognition** — set speaker names for the local voice-type heuristic;
   pre-provisioned voice prints are also consumed when present. Backend enrollment
-  is not part of the 0.21 rapid pilot. See
+  is not part of the 0.22 rapid pilot. See
   [Speaker recognition](features.md#speaker-recognition).
 - **Memory** — first opt in with `enable_voice_memory: true`, then say *"remember
   that the bins go out Thursday"*. See

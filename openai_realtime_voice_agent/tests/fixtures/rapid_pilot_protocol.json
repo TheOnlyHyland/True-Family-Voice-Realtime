@@ -1,8 +1,11 @@
 {
-  "backend_version": "0.21.1",
+  "backend_version": "0.22.0",
   "legacy_backend_version": "0.20.6",
-  "minimum_firmware_version": "0.19.0",
-  "validated_firmware_release": {
+  "firmware_release_binding": {
+    "status": "pending"
+  },
+  "regression_firmware_version": "0.19.0",
+  "regression_firmware_release": {
     "version": "0.19.0",
     "manifest_sha256": "b9b12d87346148d5260a53d6303eb8c44ffb3cd24d6eb5c1a0017baccdc3a9d3",
     "factory_sha256": "7f0ffaeaecb861ceb342ad571501b14c6017161bbb6d90f489002ae4271f6b14",
@@ -28,6 +31,28 @@
     "commit_follow_up_ack",
     "microphone_open"
   ],
+  "tool_continuation_audio_sequence": [
+    "response_a_done",
+    "source_and_chunker_work_drained",
+    "final_partial_pcm_padded_at_most_once",
+    "queued_and_active_writes_drained",
+    "follow_up_finalized",
+    "response_b_created"
+  ],
+  "tool_continuation_failure_sequence": [
+    "finish_deadline_expired",
+    "response_a_generation_settled",
+    "stale_socket_detached_and_closed_or_aborted",
+    "response_a_grant_released",
+    "recovery_without_response_b"
+  ],
+  "phase_semantics": {
+    "initial_physical_values": ["listening", "thinking", "replying"],
+    "follow_up_progress_values": ["listening", "thinking", "replying"],
+    "terminal_value": "idle",
+    "terminal_token_forbidden": true,
+    "physical_wake_ceiling_ms": 120000
+  },
   "backend_to_device": [
     "hello",
     "request_follow_up",
@@ -60,6 +85,7 @@
     "commit_follow_up": ["type", "token", "session_nonce", "ready_nonce"],
     "ack": ["type", "session_nonce", "wake_generation"],
     "phase": ["type", "value", "session_nonce", "wake_generation"],
+    "follow_up_progress_phase": ["type", "value", "token", "session_nonce", "wake_generation"],
     "prepare_suppress_followup": ["type", "token"],
     "commit_suppress_followup": ["type", "token"],
     "cancel_suppress_followup": ["type", "token"]

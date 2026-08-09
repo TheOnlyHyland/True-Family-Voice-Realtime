@@ -2,6 +2,42 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.0 (source candidate)
+
+- **Not deployable yet:** the exact compatible firmware source commit and
+  release-artifact hashes are pending. CI fails closed for every image
+  publication and release event until that binding is finalized. Firmware
+  `0.19.0` remains regression evidence only.
+- Follow-up turns are now serial rather than count-limited. The model may request
+  one useful question at a time and rearm only after the current OPEN window is
+  consumed by a genuine answer bound to its exact fresh speech-start item and
+  transcript, with no round-count limit inside the existing 120-second
+  physical-wake ceiling. Repeated-OPEN progression phases carry that
+  transaction's token, terminal idle is tokenless, and expired, silently closed,
+  queued prior-round, historical speech-item, and recovery-raced authority fails
+  closed.
+- Added a silent, sole-tool `end_conversation` path for random or unrelated
+  answers. The backend briefly holds text, transcript, and PCM from that decision
+  response and discards them only when the immutable terminal ledger contains
+  exactly one authorized close call. Mixed, pending, late, invalid, or timed-out
+  outcomes release normally. It cannot reopen the microphone or act on a stale
+  session, wake, answer item, or follow-up token.
+- Tool continuation now waits for response A's exact Pipecat source frames,
+  chunker work, queued chunks, adapter-owned partial PCM, and active WebSocket
+  writes before creating response B. At most one final partial PCM chunk is
+  zero-padded and sent. Stop, mute, disconnect, replacement, recovery, timeout,
+  processing stall, and write failure discard the old generation immediately;
+  cancellation-resistant work, including graceful-finish deadline expiry,
+  retires its physical socket before the response grant is released or failure
+  returns, without creating the tool continuation response.
+- Added stub and real-Pipecat 0.0.97 coverage for strict A-before-B wire order,
+  processing/queued/active/partial audio, no-audio completion, ownership loss,
+  timeout, physical send failure, cancellation-resistant writes, Pipecat idle
+  buffer cleanup, slow-tool phase transitions, cancellation-resistant socket
+  close, finish-deadline settlement with a live Pipecat sender,
+  recovery-vs-bind races, historical speech replay, and zero-output silent
+  terminal decisions.
+
 ## 0.21.1 (fork)
 
 - Removed the unsupported top-level `strict` field from the

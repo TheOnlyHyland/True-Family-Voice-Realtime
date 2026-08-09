@@ -8,11 +8,11 @@ from typing import Any, Awaitable, Callable, Dict
 logger = logging.getLogger(__name__)
 
 REQUEST_FOLLOW_UP_TOOL_NAME = "request_follow_up"
-REQUEST_FOLLOW_UP_PURPOSE = "necessary_clarification"
+REQUEST_FOLLOW_UP_PURPOSE = "conversational_turn"
 
 
 class FollowUpReservationOutcome(str, Enum):
-    """Backend-only result of spending this physical wake's follow-up budget."""
+    """Backend-only result of reserving the current turn's follow-up authority."""
 
     RESERVED = "reserved"
     ALREADY_RESERVED = "already_reserved"
@@ -20,17 +20,16 @@ class FollowUpReservationOutcome(str, Enum):
 
 
 def get_request_follow_up_tool_definition() -> Dict[str, Any]:
-    """Return the Realtime-compatible schema for one necessary follow-up."""
+    """Return the Realtime-compatible schema for one conversational follow-up."""
     return {
         "type": "function",
         "name": REQUEST_FOLLOW_UP_TOOL_NAME,
         "description": (
-            "Call as the sole tool immediately before asking exactly one short, "
-            "necessary question, and only when the user's request cannot be completed "
-            "safely or sensibly without one answer. Never call for an ordinary answer, "
-            "an optional offer, a confirmation, a rhetorical question, 'anything else?', "
-            "or to keep the conversation alive. Never call "
-            "alongside another tool. When uncertain, do not call."
+            "Call as the sole tool immediately before asking exactly one short "
+            "question whenever another user turn would be useful to continue, clarify, "
+            "personalize, or naturally complete the active conversation. It may be "
+            "called again after each genuine answer. Never call alongside another tool "
+            "and never ask more than one question per call."
         ),
         "parameters": {
             "type": "object",
@@ -39,8 +38,8 @@ def get_request_follow_up_tool_definition() -> Dict[str, Any]:
                     "type": "string",
                     "enum": [REQUEST_FOLLOW_UP_PURPOSE],
                     "description": (
-                        "Use only when one answer is required to complete the "
-                        "current request safely or sensibly."
+                        "Use when exactly one more user answer would make the active "
+                        "conversation more useful."
                     ),
                 }
             },
@@ -103,7 +102,7 @@ def create_request_follow_up_tool_handler(
                 {
                     "status": "follow_up_requires_wake",
                     "instruction": (
-                        "Ask exactly one short, necessary question, then stop. Keep "
+                        "Ask exactly one short question, then stop. Keep "
                         "the question in conversation context so the user can answer "
                         "after a fresh wake. Do not mention this tool, the microphone, "
                         "a wake word, a listening window, or a timeout. Ask no other "
@@ -137,7 +136,7 @@ def create_request_follow_up_tool_handler(
                 else "follow_up_already_reserved"
             ),
             "instruction": (
-                "Now ask exactly one short, necessary question. Do not mention this "
+                "Now ask exactly one short question. Do not mention this "
                 "tool, the microphone, a listening window, or a timeout. Ask no "
                 "other question."
             ),

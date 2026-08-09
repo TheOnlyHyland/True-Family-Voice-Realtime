@@ -17,22 +17,25 @@ drop-in for the stock HA voice pipeline.
 > that streams audio to it →
 > **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**.
 
-> **0.21 rollout warning:** install firmware 0.19.0 or newer first, verify it,
-> and only then start/update this backend to 0.21.0. For rollback, reverse that
-> order: backend first, firmware second. Backend-first rollout and firmware-first
-> rollback are unsupported. See the repository's `RELEASE.md`.
+> **0.22.0 is source-only and must not be deployed yet.** Its exact firmware
+> source commit and artifact hashes are pending, and publication is deliberately
+> blocked. Keep using released backend 0.21.1 with firmware 0.19.0 until the
+> repository's `RELEASE.md` records a finalized 0.22.0 binding.
 
 ## What it does
 
 - **Natural voice conversations** (speech in → speech out, no separate STT/TTS
-  step) — interrupt mid-sentence; ordinary replies close the mic, while one
-  necessary model-requested follow-up may continue without re-waking.
+  step) — interrupt mid-sentence; ordinary replies close the mic, while the model
+  may request one useful no-wake question at a time and continue again after each
+  genuine answer within the same 120-second physical wake.
+- **Unclipped tool continuations** — generation-bound audio finishes through the
+  Pipecat chunker and physical WebSocket before the next response can start.
 - **Controls Home Assistant** through the official HA *MCP Server* integration —
   lights, switches, scenes, climate, etc., scoped to both the entities you expose
   to Assist and an exact nonempty tool allow-list enforced again at dispatch.
 - **Knows who's speaking** — local voice-print identification and speaker-gated
   tools. Existing prints can be consumed, but backend microphone enrollment is
-  absent from the 0.21 rapid pilot.
+  absent from the 0.22 rapid pilot.
 - **Remembers what you teach it when explicitly enabled** — persistent memory is
   off by default, stored locally, and writable only by identified household voices.
 - **Voice timers** — personal spoken announcement, then a gentle bell only if
@@ -47,7 +50,8 @@ drop-in for the stock HA voice pipeline.
 
 1. Add this repository to Home Assistant (Settings → Add-ons → Add-on Store → ⋮ →
    **Repositories**): `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
-2. Install **True Family Voice Realtime**, configure it, but do not start 0.21.0 yet.
+2. Install released **True Family Voice Realtime 0.21.1** and configure it. Do not
+   install this 0.22.0 source candidate until its firmware binding is finalized.
 3. Flash firmware 0.19.0 or newer from
    **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**
    using its pinned ESPHome Builder stub. Later updates require deliberately
