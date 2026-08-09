@@ -25,11 +25,12 @@ def get_request_follow_up_tool_definition() -> Dict[str, Any]:
         "type": "function",
         "name": REQUEST_FOLLOW_UP_TOOL_NAME,
         "description": (
-            "Call as the sole tool immediately before asking exactly one short "
-            "question whenever another user turn would be useful to continue, clarify, "
-            "personalize, or naturally complete the active conversation. It may be "
-            "called again after each genuine answer. Never call alongside another tool "
-            "and never ask more than one question per call."
+            "Mandatory before any spoken or written question that expects an immediate "
+            "user answer, including the first question in a user-requested "
+            "multi-question sequence. Call as the sole output in a response containing "
+            "no speech, text, or other tool. After the successful result, ask exactly "
+            "one short question and stop. Call again after each genuine relevant answer "
+            "before asking the next question."
         ),
         "parameters": {
             "type": "object",
@@ -38,8 +39,8 @@ def get_request_follow_up_tool_definition() -> Dict[str, Any]:
                     "type": "string",
                     "enum": [REQUEST_FOLLOW_UP_PURPOSE],
                     "description": (
-                        "Use when exactly one more user answer would make the active "
-                        "conversation more useful."
+                        "Use before one question that expects the user's immediate "
+                        "answer, including one step in a multi-question sequence."
                     ),
                 }
             },

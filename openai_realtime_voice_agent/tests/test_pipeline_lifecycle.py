@@ -6823,7 +6823,11 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(combined.startswith(saved + "\n\n"))
         self.assertIn(main.RAPID_PILOT_POLICY_MARKER, combined)
-        self.assertIn("request_follow_up as the sole", combined)
+        self.assertIn("MUST first call request_follow_up", combined)
+        self.assertIn("only that function call", combined)
+        self.assertIn("first question in a user-requested multi-question", combined)
+        self.assertIn("never ask that first question directly", combined)
+        self.assertIn("repeat the\ntool-only call before asking the next question", combined)
         self.assertIn("end_conversation as the sole tool", combined)
         self.assertIn("produce no spoken reply", combined)
         self.assertIn("Never claim that the microphone is open", combined)
