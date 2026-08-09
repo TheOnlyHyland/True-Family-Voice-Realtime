@@ -17,10 +17,10 @@ drop-in for the stock HA voice pipeline.
 > that streams audio to it →
 > **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**.
 
-> **0.22.0 is source-only and must not be deployed yet.** Its exact firmware
-> source commit and artifact hashes are pending, and publication is deliberately
-> blocked. Keep using released backend 0.21.1 with firmware 0.19.0 until the
-> repository's `RELEASE.md` records a finalized 0.22.0 binding.
+> **The backend 0.22.0 firmware binding is finalized to exact firmware 0.20.0.**
+> Update and verify firmware first, then install only the protected published
+> backend image. Until that image and GitHub release exist, keep using released
+> backend 0.21.1. A source checkout is not deployable.
 
 ## What it does
 
@@ -50,9 +50,9 @@ drop-in for the stock HA voice pipeline.
 
 1. Add this repository to Home Assistant (Settings → Add-ons → Add-on Store → ⋮ →
    **Repositories**): `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
-2. Install released **True Family Voice Realtime 0.21.1** and configure it. Do not
-   install this 0.22.0 source candidate until its firmware binding is finalized.
-3. Flash firmware 0.19.0 or newer from
+2. Install the current published **True Family Voice Realtime** release and
+   configure it. Never install 0.22.0 directly from a source checkout.
+3. Before backend 0.22.0, flash exact firmware 0.20.0 from
    **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**
    using its pinned ESPHome Builder stub. Later updates require deliberately
    advancing both immutable refs to the approved newer tag.

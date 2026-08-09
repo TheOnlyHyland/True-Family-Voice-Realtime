@@ -47,15 +47,15 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: theonlyhyland/true-family-voice-realtime/openai-realtime-voice-agent
   ADDON_VERSION: 0.22.0
-  FIRMWARE_RELEASE_BINDING: pending
-  FIRMWARE_RELEASE_VERSION: ""
-  FIRMWARE_RELEASE_SOURCE_COMMIT: ""
+  FIRMWARE_RELEASE_BINDING: finalized
+  FIRMWARE_RELEASE_VERSION: 0.20.0
+  FIRMWARE_RELEASE_SOURCE_COMMIT: 36abf4ba861e2ca30968882311ed3b2562b47367
   FIRMWARE_RELEASE_REPOSITORY: TheOnlyHyland/True-Family-Voice-Firmware
-  FIRMWARE_RELEASE_MANIFEST_SHA256: ""
-  FIRMWARE_RELEASE_FACTORY_SHA256: ""
-  FIRMWARE_RELEASE_OTA_SHA256: ""
-  FIRMWARE_RELEASE_ELF_SHA256: ""
-  FIRMWARE_RELEASE_SHA256SUMS_SHA256: ""
+  FIRMWARE_RELEASE_MANIFEST_SHA256: 09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f
+  FIRMWARE_RELEASE_FACTORY_SHA256: 8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65
+  FIRMWARE_RELEASE_OTA_SHA256: a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38
+  FIRMWARE_RELEASE_ELF_SHA256: 9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88
+  FIRMWARE_RELEASE_SHA256SUMS_SHA256: 280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3
   REGRESSION_FIRMWARE_VERSION: 0.19.0
   REGRESSION_FIRMWARE_SOURCE_COMMIT: bcb3bf4cbf181397b51aa7cc5bca5cfecefc7b3a
   REGRESSION_FIRMWARE_REPOSITORY: TheOnlyHyland/True-Family-Voice-Firmware
@@ -84,12 +84,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - name: Refuse release or publication while firmware binding is pending
+      - name: Require finalized exact firmware release binding
         if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         shell: bash
         run: |
           set -euo pipefail
           test "$FIRMWARE_RELEASE_BINDING" = "finalized"
+          test "$FIRMWARE_RELEASE_VERSION" = "0.20.0"
+          test "$FIRMWARE_RELEASE_REPOSITORY" = \
+            "TheOnlyHyland/True-Family-Voice-Firmware"
+          test "$FIRMWARE_RELEASE_SOURCE_COMMIT" = \
+            "36abf4ba861e2ca30968882311ed3b2562b47367"
+          test "$FIRMWARE_RELEASE_MANIFEST_SHA256" = \
+            "09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f"
+          test "$FIRMWARE_RELEASE_FACTORY_SHA256" = \
+            "8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65"
+          test "$FIRMWARE_RELEASE_OTA_SHA256" = \
+            "a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38"
+          test "$FIRMWARE_RELEASE_ELF_SHA256" = \
+            "9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88"
+          test "$FIRMWARE_RELEASE_SHA256SUMS_SHA256" = \
+            "280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3"
           [[ "$FIRMWARE_RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$FIRMWARE_RELEASE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           for DIGEST in \

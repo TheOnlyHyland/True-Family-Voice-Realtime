@@ -8,10 +8,10 @@ A complete, from-zero walkthrough. You'll set up two halves:
 Plan ~30–45 minutes the first time. Later firmware updates require deliberately
 advancing the two pinned release references after reviewing the new release.
 
-> **0.22.0 is source-only and must not be deployed yet.** Its exact firmware
-> source commit and release-artifact hashes are pending, and CI blocks
-> publication. Keep using released backend 0.21.1 with firmware 0.19.0. Once the
-> new binding is finalized, update firmware first and backend second. Roll back
+> **The backend 0.22.0 firmware binding is finalized to exact firmware 0.20.0.**
+> Update and verify firmware first, then install backend 0.22.0 only from its
+> protected published image. Until that image and GitHub release exist, keep
+> using released backend 0.21.1. A source checkout is not deployable. Roll back
 > backend first and firmware second.
 
 ```
@@ -96,11 +96,12 @@ Before the first run, configure all required authority and media fences:
 Everything else can wait. The full reference — every option, its default, and when
 to change it — is in the [Configuration Reference](configuration.md).
 
-### 1.5 Do not deploy the 0.22.0 source candidate
+### 1.5 Use only the protected 0.22.0 release artifact
 
-Save the configuration, but do **not** install or start backend 0.22.0. Its exact
-firmware binding is not finalized. The firmware steps below remain the released
-0.21.1 path until Release Safety names the reviewed 0.22.0 inputs.
+Save the configuration, but do **not** install or start backend 0.22.0 from a
+source checkout. Its binding is finalized to firmware 0.20.0, which must be
+updated and verified first. Install backend 0.22.0 only after the protected image
+and GitHub release exist; otherwise remain on released backend 0.21.1.
 
 ---
 
@@ -167,8 +168,8 @@ Two of these confuse people, so to be clear:
 
 1. In ESPHome Builder, **Edit** the adopted device and **replace its entire YAML** with
    a ready-made stub from the firmware repo:
-   - DHCP: [`esphome-builder.dhcp.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.dhcp.yaml)
-   - Fixed IP: [`esphome-builder.static-ip.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.static-ip.yaml)
+   - DHCP: [`esphome-builder.dhcp.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.0/esphome-builder.dhcp.yaml)
+   - Fixed IP: [`esphome-builder.static-ip.yaml`](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.0/esphome-builder.static-ip.yaml)
 
    Set `name` and `friendly_name`, and **keep** the `packages:` / `dashboard_import:`
    lines — those are what pull the full firmware from the repo. Keep the device
@@ -178,7 +179,7 @@ Two of these confuse people, so to be clear:
    > `va_url:` line under `substitutions:` with your HA host, e.g.
    > `va_url: "ws://192.168.1.x:8080/"`.
 
-   The two `0.19.0` references are immutable and do not discover future releases.
+   The two `0.20.0` references are immutable and do not discover future releases.
    For an approved update, advance both references to the exact newer tag or
    deliberately use that release's pinned stub.
 
@@ -189,11 +190,12 @@ Two of these confuse people, so to be clear:
 
 The device now boots with compatible firmware and waits for the backend.
 
-### 2.5 Start the released backend
+### 2.5 Start the protected published backend
 
-These steps apply to released backend 0.21.1 only. Do not start the 0.22.0 source
-candidate. Only after the released firmware update succeeds, click **Start** on
-the add-on and open the **Log** tab. A healthy start shows
+Only after exact firmware 0.20.0 succeeds, install and start the protected
+published backend 0.22.0 image. If that release is not yet available, keep using
+released backend 0.21.1 rather than a source checkout. Click **Start** on the
+add-on and open the **Log** tab. A healthy start shows
 `✅ Fetched N MCP tools` and
 `Creating session with N tools` (with `Hass*` names). The add-on listens on port
 **8080**, and the device can now connect.
@@ -231,7 +233,7 @@ the add-on and open the **Log** tab. A healthy start shows
 
 - **Firmware:** review the new firmware release, update both immutable refs in
   your device stub to that exact tag, then compile and flash it over Wi-Fi. The
-  pinned `0.19.0` stub deliberately does not advertise moving releases.
+  pinned `0.20.0` stub deliberately does not advertise moving releases.
 - **Add-on:** Home Assistant shows an **Update** badge on the add-on (with a changelog).
   Update firmware first when the release notes require a coordinated protocol
   version, verify it, then update the add-on image.

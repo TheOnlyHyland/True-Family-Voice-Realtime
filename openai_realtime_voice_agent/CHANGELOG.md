@@ -4,10 +4,11 @@ All notable changes to this add-on. Newest first.
 
 ## 0.22.0 (source candidate)
 
-- **Not deployable yet:** the exact compatible firmware source commit and
-  release-artifact hashes are pending. CI fails closed for every image
-  publication and release event until that binding is finalized. Firmware
-  `0.19.0` remains regression evidence only.
+- The release firmware binding is finalized to public firmware `0.20.0` from
+  `TheOnlyHyland/True-Family-Voice-Firmware` source commit
+  `36abf4ba861e2ca30968882311ed3b2562b47367` and its exact manifest, factory,
+  OTA, ELF, and `SHA256SUMS` hashes. Publication and release CI require those
+  exact inputs; firmware `0.19.0` remains separate regression evidence only.
 - Follow-up turns are now serial rather than count-limited. The model may request
   one useful question at a time and rearm only after the current OPEN window is
   consumed by a genuine answer bound to its exact fresh speech-start item and

@@ -49,7 +49,8 @@ class ReleaseHardeningTests(unittest.TestCase):
         for value in (LOCK_SHA256, MODEL_SHA256, AARCH64_BASE, AMD64_BASE):
             self.assertIn(value, workflow + dockerfile + build)
         self.assertIn("ADDON_VERSION: 0.22.0", workflow)
-        self.assertIn("FIRMWARE_RELEASE_BINDING: pending", workflow)
+        self.assertIn("FIRMWARE_RELEASE_BINDING: finalized", workflow)
+        self.assertNotIn("FIRMWARE_RELEASE_BINDING: pending", workflow)
         self.assertIn("BUILD_REVISION=${{ github.sha }}", workflow)
         self.assertIn("org.opencontainers.image.revision", dockerfile)
         self.assertIn("io.true-family.voice.poetry-lock-sha256", dockerfile)
@@ -107,10 +108,19 @@ class ReleaseHardeningTests(unittest.TestCase):
             "github.event_name == 'workflow_dispatch' && inputs.publish",
             "Verify release artifact was published first",
             'test "$VERSION_MANIFEST" = "$SOURCE_MANIFEST"',
-            "Refuse release or publication while firmware binding is pending",
+            "Require finalized exact firmware release binding",
             'test "$FIRMWARE_RELEASE_BINDING" = "finalized"',
+            'test "$FIRMWARE_RELEASE_VERSION" = "0.20.0"',
+            "FIRMWARE_RELEASE_SOURCE_COMMIT: "
+            "36abf4ba861e2ca30968882311ed3b2562b47367",
+            "FIRMWARE_RELEASE_MANIFEST_SHA256: "
+            "09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f",
         ):
             self.assertIn(term, workflow)
+        self.assertGreaterEqual(
+            workflow.count('test "$PILOT_FIRMWARE_SOURCE_ONLY" != "true"'),
+            2,
+        )
         self.assertNotIn(":latest", workflow)
         self.assertNotIn('test "$GITHUB_REF" = "refs/heads/main"', workflow)
         publish_job = workflow.split("\n  publish:\n", 1)[1].split(
@@ -183,7 +193,10 @@ class ReleaseHardeningTests(unittest.TestCase):
 
         self.assertIn("firmware first", docs)
         self.assertIn("backend first", docs)
+        self.assertIn("firmware 0.20.0", docs)
         self.assertIn("firmware 0.19.0", docs)
+        self.assertIn("binding is finalized", docs)
+        self.assertNotIn("firmware binding is pending", docs)
         self.assertIn(
             "backend microphone enrollment is deliberately absent from the 0.22",
             configuration.lower(),

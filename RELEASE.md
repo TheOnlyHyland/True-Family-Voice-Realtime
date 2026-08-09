@@ -2,19 +2,34 @@
 
 ## Compatibility Order
 
-Version 0.22.0 is currently a source-only candidate. Its exact Voice PE firmware
-source commit and release-artifact hashes are **pending**. Do not build, publish,
-tag, install, or deploy it until that binding is finalized and reviewed.
+The exact Voice PE firmware binding for backend 0.22.0 is finalized:
 
-The workflow records `FIRMWARE_RELEASE_BINDING: pending` and deliberately fails
-every publication or release event. The immutable firmware 0.19.0 values retained
-in this repository are regression-test evidence for the last release, not the
-0.22.0 release binding and not deployment authorization.
+- Firmware version: `0.20.0`
+- Repository: `TheOnlyHyland/True-Family-Voice-Firmware`
+- Source commit: `36abf4ba861e2ca30968882311ed3b2562b47367`
+- Manifest SHA-256:
+  `09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f`
+- Factory image SHA-256:
+  `8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65`
+- OTA image SHA-256:
+  `a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38`
+- ELF SHA-256:
+  `9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88`
+- `SHA256SUMS` SHA-256:
+  `280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3`
 
-> **Upgrade firmware first after the binding is finalized.** Keep the existing
-> backend running, update and verify the exact firmware named by the future
-> 0.22.0 release binding, then update the backend. Starting backend 0.22.0 before
-> that binding exists is unsupported.
+The workflow records `FIRMWARE_RELEASE_BINDING: finalized`. Publication and
+release jobs still fail closed unless every value above is exact, the public
+firmware package matches every hash, and the checked-out source has the exact
+commit and version. The immutable firmware 0.19.0 values retained separately in
+this repository remain regression evidence for the previous release; they are
+not the 0.22.0 release binding and cannot authorize publication.
+
+> **Upgrade firmware first.** Keep the existing backend running, update and
+> verify exact firmware 0.20.0, then update to backend 0.22.0 only after its
+> protected images and GitHub release exist. Starting backend 0.22.0 before the
+> firmware update succeeds is unsupported. A source checkout is not a release
+> artifact.
 
 > **Rollback the backend first.** Keep the newer firmware running, roll the
 > backend back to the previously compatible version and verify reconnection,
@@ -63,10 +78,11 @@ The firmware artifact is not copied into or modified by this repository.
 
 Normal source CI checks out the historical firmware `0.19.0` commit and validates
 the source-level protocol shapes as a regression gate. A standalone local test
-run may use the committed fixture when external inputs are absent. This evidence
-does not satisfy the 0.22.0 release gate; release and publication remain blocked
-until the fixture, workflow, and documentation carry a separately reviewed exact
-0.22.0 firmware source and artifact binding.
+run may use the committed fixture when external inputs are absent. Publication
+and release CI instead checks out exact firmware 0.20.0 source commit
+`36abf4ba861e2ca30968882311ed3b2562b47367`, downloads its public release
+package, and requires every finalized hash above. The historical evidence does
+not satisfy or replace that 0.22.0 release gate.
 
 The historical `pilot_firmware_source_only` workflow input is retained for
 auditability but cannot authorize a 0.22.0 image or public GitHub release. Every
@@ -76,7 +92,7 @@ verification enforces the same public binding.
 
 ## Follow-Up Transaction Authenticity
 
-The future compatible firmware binding must implement the fixture's exact
+The finalized firmware 0.20.0 binding must implement the fixture's exact
 `follow_up_progress_phase` shape: `type`, `value`, `token`, `session_nonce`, and
 `wake_generation`. Initial physical-wake phases retain the existing trusted
 four-field shape, and the historical two-field phase remains regression-only.
@@ -84,10 +100,9 @@ The backend emits tokenized `listening`, `thinking`, and `replying` progression
 only for the current answer to an OPEN follow-up transaction. Terminal `idle` is
 always tokenless and a token-bearing terminal phase is rejected. Phase authority
 also expires at the 120-second physical-wake ceiling, during silent close, or
-after its captured wake or local transaction epoch changes. The presently
-available sibling firmware source does not implement this final shape, which is
-an additional reason the release stays blocked while
-`FIRMWARE_RELEASE_BINDING` is `pending`.
+after its captured wake or local transaction epoch changes. Mandatory release
+CI validates these protocol shapes against the exact finalized firmware source;
+they cannot be waived by the historical source-only pilot input.
 
 Answer acceptance also requires the exact fresh OpenAI speech-start item ID and
 its monotonic local sequence before that same item's nonblank transcript can
@@ -160,8 +175,9 @@ build, not the release artifact consumed by normal installations.
 
 ## Publication Order
 
-Publication is currently blocked. Do not execute this sequence while
-`FIRMWARE_RELEASE_BINDING` is `pending`.
+The firmware binding is finalized, but publication remains protected and
+content-addressed. Execute this sequence only from the reviewed candidate after
+its normal CI passes; never treat a source checkout as an installable release.
 
 1. Commit the exact release candidate on a reviewed release branch and let its
    normal CI pass. Do not merge the version bump to `main` yet.

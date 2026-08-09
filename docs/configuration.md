@@ -15,10 +15,10 @@ Two places hold configuration:
 > Version 0.22.0 requires the default `semantic_vad`; selecting `server_vad`
 > blocks startup.
 
-> **Version 0.22.0 is source-only.** Its exact firmware binding is pending and
-> publication is blocked. Do not deploy it. Once finalized, rollout remains
-> firmware first and backend second; rollback remains backend first and firmware
-> second.
+> **Version 0.22.0 is bound to exact firmware 0.20.0.** Update and verify that
+> firmware first, then install only the protected published backend image. A
+> source checkout is not a release artifact. Rollback remains backend first and
+> firmware second.
 
 ## 🔑 Basics
 

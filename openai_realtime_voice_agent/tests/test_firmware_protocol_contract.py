@@ -23,6 +23,27 @@ from app.protocol_json import (  # noqa: E402
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "rapid_pilot_protocol.json"
 CONTRACT = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+FINAL_FIRMWARE_RELEASE = {
+    "status": "finalized",
+    "version": "0.20.0",
+    "repository": "TheOnlyHyland/True-Family-Voice-Firmware",
+    "source_commit": "36abf4ba861e2ca30968882311ed3b2562b47367",
+    "manifest_sha256": (
+        "09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f"
+    ),
+    "factory_sha256": (
+        "8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65"
+    ),
+    "ota_sha256": (
+        "a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38"
+    ),
+    "elf_sha256": (
+        "9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88"
+    ),
+    "sha256sums_sha256": (
+        "280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3"
+    ),
+}
 
 DEFAULT_FIRMWARE_ROOT = Path(__file__).resolve().parents[3] / "firmware"
 FIRMWARE_ROOT = Path(
@@ -89,17 +110,27 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         )
         self.assertIn("TRUE_FAMILY_VOICE_REQUIRE_FIRMWARE_VALIDATION:", workflow)
         self.assertIn("ref: ${{ env.REGRESSION_FIRMWARE_SOURCE_COMMIT }}", workflow)
-        self.assertIn("FIRMWARE_RELEASE_BINDING: pending", workflow)
-        for field in (
-            "FIRMWARE_RELEASE_VERSION",
-            "FIRMWARE_RELEASE_SOURCE_COMMIT",
-            "FIRMWARE_RELEASE_MANIFEST_SHA256",
-            "FIRMWARE_RELEASE_FACTORY_SHA256",
-            "FIRMWARE_RELEASE_OTA_SHA256",
-            "FIRMWARE_RELEASE_ELF_SHA256",
-            "FIRMWARE_RELEASE_SHA256SUMS_SHA256",
-        ):
-            self.assertIn(f'{field}: ""', workflow)
+        release_env = {
+            "FIRMWARE_RELEASE_BINDING": "finalized",
+            "FIRMWARE_RELEASE_VERSION": FINAL_FIRMWARE_RELEASE["version"],
+            "FIRMWARE_RELEASE_REPOSITORY": FINAL_FIRMWARE_RELEASE["repository"],
+            "FIRMWARE_RELEASE_SOURCE_COMMIT": FINAL_FIRMWARE_RELEASE[
+                "source_commit"
+            ],
+            "FIRMWARE_RELEASE_MANIFEST_SHA256": FINAL_FIRMWARE_RELEASE[
+                "manifest_sha256"
+            ],
+            "FIRMWARE_RELEASE_FACTORY_SHA256": FINAL_FIRMWARE_RELEASE[
+                "factory_sha256"
+            ],
+            "FIRMWARE_RELEASE_OTA_SHA256": FINAL_FIRMWARE_RELEASE["ota_sha256"],
+            "FIRMWARE_RELEASE_ELF_SHA256": FINAL_FIRMWARE_RELEASE["elf_sha256"],
+            "FIRMWARE_RELEASE_SHA256SUMS_SHA256": FINAL_FIRMWARE_RELEASE[
+                "sha256sums_sha256"
+            ],
+        }
+        for field, value in release_env.items():
+            self.assertIn(f"{field}: {value}", workflow)
         self.assertIn("ref: ${{ env.FIRMWARE_RELEASE_SOURCE_COMMIT }}", workflow)
         self.assertIn('[[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]]', workflow)
         self.assertIn("REGRESSION_FIRMWARE_VERSION: 0.19.0", workflow)
@@ -109,10 +140,17 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "Refuse release or publication while firmware binding is pending",
+            "Require finalized exact firmware release binding",
             workflow,
         )
+        normalized_workflow = re.sub(r"\\\n\s*", "", workflow)
+        for field, value in release_env.items():
+            self.assertIn(f'test "${field}" = "{value}"', normalized_workflow)
         self.assertIn("pilot_firmware_source_only", workflow)
+        self.assertGreaterEqual(
+            workflow.count('test "$PILOT_FIRMWARE_SOURCE_ONLY" != "true"'),
+            2,
+        )
         self.assertIn("github.event_name == 'release'", workflow)
         self.assertIn(f"POETRY_LOCK_SHA256: {lock_digest}", workflow)
         self.assertIn(f"ARG POETRY_LOCK_SHA256={lock_digest}", dockerfile)
@@ -130,7 +168,7 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         self.assertEqual(CONTRACT["backend_version"], "0.22.0")
         self.assertEqual(
             CONTRACT["firmware_release_binding"],
-            {"status": "pending"},
+            FINAL_FIRMWARE_RELEASE,
         )
         self.assertEqual(CONTRACT["regression_firmware_version"], "0.19.0")
         self.assertEqual(
@@ -294,8 +332,12 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         ):
             self.assertIn(term, source)
 
-    def test_external_regression_firmware_artifact_matches_vendored_release(self):
-        release = CONTRACT["regression_firmware_release"]
+    def test_external_selected_firmware_artifact_matches_vendored_release(self):
+        release = (
+            CONTRACT["firmware_release_binding"]
+            if REQUIRE_EXTERNAL_FIRMWARE
+            else CONTRACT["regression_firmware_release"]
+        )
         artifact_root = FIRMWARE_ARTIFACT_ROOT
         if artifact_root is None or not artifact_root.is_dir():
             if REQUIRE_EXTERNAL_FIRMWARE:
@@ -346,7 +388,11 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         actual_version = (FIRMWARE_ROOT / "VERSION").read_text(
             encoding="utf-8"
         ).strip()
-        expected_version = CONTRACT["regression_firmware_release"]["version"]
+        expected_version = (
+            CONTRACT["firmware_release_binding"]["version"]
+            if REQUIRE_EXTERNAL_FIRMWARE
+            else CONTRACT["regression_firmware_release"]["version"]
+        )
         if actual_version != expected_version and not REQUIRE_EXTERNAL_FIRMWARE:
             self.skipTest(
                 "optional sibling firmware checkout does not match the "

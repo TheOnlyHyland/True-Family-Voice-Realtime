@@ -20,11 +20,11 @@ complete option reference, agent integration, and FAQ:
 <https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/tree/main/docs>.
 This page covers setup and day-to-day essentials.
 
-> **0.22.0 is source-only and must not be deployed yet.** Its exact firmware
-> source commit and release-artifact hashes are pending. CI blocks publication
-> until that binding is finalized. Continue using released backend 0.21.1 with
-> firmware 0.19.0. Future upgrades remain firmware first and backend second;
-> rollback remains backend first and firmware second.
+> **The backend 0.22.0 firmware binding is finalized to exact firmware 0.20.0.**
+> Update and verify firmware first, then install only the protected published
+> backend image. Until that image and GitHub release exist, continue using
+> released backend 0.21.1. A source checkout is not deployable. Rollback remains
+> backend first and firmware second.
 
 ---
 
@@ -35,8 +35,9 @@ This page covers setup and day-to-day essentials.
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
 3. Find **True Family Voice Realtime** in the store and click **Install**.
    Home Assistant pulls the CI-verified image for this exact add-on version.
-4. Open the add-on's **Configuration** tab to set it up. Do not install or start
-   the 0.22.0 source candidate until its exact firmware binding is finalized.
+4. Open the add-on's **Configuration** tab to set it up. For 0.22.0, update exact
+   firmware 0.20.0 first and install only the protected published backend image,
+   never a source checkout.
 
 **One add-on instance serves one Voice PE device.** For multiple devices, run one
 instance per device (a local-add-on copy with its own `slug`, `name` and

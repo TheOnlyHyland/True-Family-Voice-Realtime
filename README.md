@@ -88,20 +88,20 @@ letting old PCM cross an ownership boundary.
 
 ## Quick start
 
-> **0.22.0 is source-only and must not be deployed yet.** Its exact firmware
-> source commit and artifact hashes are still pending, and CI deliberately blocks
-> image publication and release verification. Keep using the released 0.21.1
-> backend with firmware 0.19.0 until [Release Safety](RELEASE.md) names a finalized
-> 0.22.0 binding.
+> **The backend 0.22.0 firmware binding is finalized to exact firmware 0.20.0.**
+> Update and verify firmware first, then install only the protected published
+> backend image. Until that image and GitHub release exist, keep using released
+> backend 0.21.1. A source checkout is not deployable. See
+> [Release Safety](RELEASE.md) for the immutable source and artifact binding.
 
-1. **For the released 0.21.1 version, install but do not start the add-on yet**: Settings → Add-ons → Add-on Store
+1. **Install the current published version, but do not start the add-on yet**: Settings → Add-ons → Add-on Store
    → ⋮ → Repositories → add
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime` → install
    **True Family Voice Realtime** and set your OpenAI API key.
 2. **Give it your home**: add Home Assistant's **MCP Server** integration, expose the entities you want voice-controlled to Assist, and populate `mcp_tool_allowlist` with every exact desired tool name. Empty exposes no MCP tools.
-3. **Flash the firmware**: adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.19.0 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.19.0/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
+3. **Flash the firmware**: before backend 0.22.0, adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.20.0 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.0/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
 4. **Before startup**, set `nearby_media_players` to the exact Living Room TV and Living Room Chromecast entity IDs for this deployment.
-5. **Start released backend 0.21.1 only after the firmware update succeeds**, then say
+5. **Start the protected published backend only after the firmware update succeeds**, then say
    **"Hey Leonard"** and ask for a light.
 
 Full walkthrough (~30–45 minutes from zero): **[Getting Started](docs/getting-started.md)**.
