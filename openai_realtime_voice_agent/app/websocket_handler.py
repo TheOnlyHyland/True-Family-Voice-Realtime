@@ -701,7 +701,7 @@ class WebSocketHandler:
             session_manager: Session manager instance
             audio_recording_service: Audio recording service instance
             follow_up_ms: Legacy automatic-window duration sent in `hello`.
-                Version 0.22.3 requires 0; explicit windows use the separate
+                Version 0.22.4 requires 0; explicit windows use the separate
                 PREPARE/READY/COMMIT transaction.
             follow_up_open_delay_ms: How long (ms) the device waits after a reply
                 finishes before opening that follow-up mic (bridges the speaker
@@ -2720,6 +2720,10 @@ class WebSocketHandler:
         ):
             raise RuntimeError("A conflicting graceful close is active")
         if self._request_follow_up_budget_spent:
+            logger.info(
+                "Requested follow-up requires a fresh wake because answer authority "
+                "was not rearmed"
+            )
             return FollowUpReservationOutcome.REQUIRES_WAKE
 
         wake_generation = self._device_wake_generation
@@ -3035,18 +3039,29 @@ class WebSocketHandler:
         user_item_sequence: int,
     ) -> bool:
         """Bind an OPEN answer grant to its exact fresh Realtime speech item."""
+        if (
+            not isinstance(user_item_id, str)
+            or not user_item_id
+            or type(user_item_sequence) is not int
+            or user_item_sequence <= 0
+        ):
+            return False
+        reservation = self._request_follow_up_reservation
+        if reservation is not None and reservation.stage is _FollowUpStage.OPEN:
+            # OpenAI's speech-start event can outrun the queued PhaseEmitter frame.
+            # Consume the exact OPEN transaction here so identity binding does not
+            # depend on downstream processor scheduling.
+            self.note_request_follow_up_turn_boundary()
         grant = self._request_follow_up_answer_grant
         if (
             grant is None
             or grant.confirmed
             or grant.user_item_id is not None
-            or not isinstance(user_item_id, str)
-            or not user_item_id
-            or type(user_item_sequence) is not int
-            or user_item_sequence <= 0
             or self._request_follow_up_reservation is not None
             or not self._follow_up_answer_grant_is_current(grant)
         ):
+            if reservation is not None and reservation.stage is _FollowUpStage.OPEN:
+                logger.info("Follow-up answer identity failed closed after OPEN speech")
             return False
         grant.user_item_id = user_item_id
         grant.user_item_sequence = user_item_sequence

@@ -2,6 +2,14 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.4
+
+- Bound fresh OpenAI speech directly to an exact OPEN follow-up transaction even
+  when its speech-start event outruns the queued PhaseEmitter callback. The later
+  callback is idempotent, malformed identities cannot consume OPEN authority, and
+  a confirmed answer can rearm the next serial question without requiring a fresh
+  wake. Added status-only diagnostics without logging transcript content.
+
 ## 0.22.3
 
 - Made the model contract explicit that every question expecting an immediate

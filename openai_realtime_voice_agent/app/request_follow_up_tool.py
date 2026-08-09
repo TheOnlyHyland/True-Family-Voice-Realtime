@@ -72,6 +72,7 @@ def create_request_follow_up_tool_handler(
             return
 
         if not follow_up_is_safe(params.tool_call_id):
+            logger.info("Requested follow-up rejected by sole-tool safety gate")
             await params.result_callback(
                 {
                     "status": "other_tool_active",

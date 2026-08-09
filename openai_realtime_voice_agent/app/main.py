@@ -164,19 +164,19 @@ def append_rapid_pilot_policy(instructions: str) -> str:
 
 
 def parse_rapid_pilot_follow_up_seconds(value: Any) -> int:
-    """Require the only supported 0.22.3 microphone mode."""
+    """Require the only supported 0.22.4 microphone mode."""
     if type(value) is int:
         seconds = value
     elif isinstance(value, str) and value.strip() == "0":
         seconds = 0
     else:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 exactly for the 0.22.3 rapid pilot; "
+            "follow_up_listen_seconds must be 0 exactly for the 0.22.4 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     if seconds != 0:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 for the 0.22.3 rapid pilot; "
+            "follow_up_listen_seconds must be 0 for the 0.22.4 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     return 0
@@ -190,11 +190,11 @@ def validate_rapid_pilot_prerequisites(
     """Keep startup mode, tool exposure, and policy prerequisites identical."""
     if turn_detection_type != "semantic_vad" or not backend_owned_response_creation:
         raise ValueError(
-            "The 0.22.3 rapid pilot requires managed semantic_vad response creation"
+            "The 0.22.4 rapid pilot requires managed semantic_vad response creation"
         )
     if max_context_messages <= 0:
         raise ValueError(
-            "The 0.22.3 rapid pilot requires max_context_messages greater than 0"
+            "The 0.22.4 rapid pilot requires max_context_messages greater than 0"
         )
 
 
@@ -206,7 +206,7 @@ def validate_selective_follow_up_media_scope(
     if request_follow_up_supported and not nearby_media_players:
         raise ValueError(
             "nearby_media_players must contain media_player.living_room_tv and "
-            "media_player.living_room_tv_audio for the 0.22.3 rapid pilot"
+            "media_player.living_room_tv_audio for the 0.22.4 rapid pilot"
         )
 
 
@@ -3704,7 +3704,7 @@ class Application:
             os.environ.get("ENABLE_VOICE_MEMORY", "false").lower() == "true"
         )
         
-        # Version 0.22.3 is the serial explicit-follow-up pilot. Automatic mode
+        # Version 0.22.4 is the serial explicit-follow-up pilot. Automatic mode
         # is intentionally rejected rather than silently changing saved intent.
         follow_up_listen_seconds = parse_rapid_pilot_follow_up_seconds(
             os.environ.get("FOLLOW_UP_LISTEN_SECONDS", "0")
