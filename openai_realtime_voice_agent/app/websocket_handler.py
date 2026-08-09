@@ -90,6 +90,14 @@ class _FollowUpAnswerGrant:
 
 
 @dataclass(frozen=True)
+class _OpenFollowUpPhaseGrant:
+    websocket: Any
+    session_nonce: int
+    wake_generation: int
+    token: int
+
+
+@dataclass(frozen=True)
 class _SilentCloseContext:
     websocket: Any
     session_nonce: int
@@ -113,6 +121,7 @@ class _PhaseAuthorizationContext:
     wake_generation: int
     follow_up_epoch: int
     follow_up_token: Optional[int]
+    terminal_idle: bool = False
 
 
 @dataclass
@@ -692,7 +701,7 @@ class WebSocketHandler:
             session_manager: Session manager instance
             audio_recording_service: Audio recording service instance
             follow_up_ms: Legacy automatic-window duration sent in `hello`.
-                Version 0.22.1 requires 0; explicit windows use the separate
+                Version 0.22.2 requires 0; explicit windows use the separate
                 PREPARE/READY/COMMIT transaction.
             follow_up_open_delay_ms: How long (ms) the device waits after a reply
                 finishes before opening that follow-up mic (bridges the speaker
@@ -747,6 +756,7 @@ class WebSocketHandler:
         self._request_follow_up_budget_spent = True
         self._request_follow_up_budget_tool_call_id: Optional[str] = None
         self._request_follow_up_answer_grant: Optional[_FollowUpAnswerGrant] = None
+        self._open_follow_up_phase_grant: Optional[_OpenFollowUpPhaseGrant] = None
         self._silent_close_context: Optional[_SilentCloseContext] = None
         self._request_follow_up_epoch = 0
         self._reply_generation = 0
@@ -792,6 +802,7 @@ class WebSocketHandler:
     def _on_connection_recovery_started(self) -> None:
         self._connection_recovery_active = True
         self._device_audio_generation = None
+        self._open_follow_up_phase_grant = None
         retired_output = self._retire_assistant_output_grant()
         if retired_output is not None:
             existing = self._recovery_output_settlement_task
@@ -1132,14 +1143,46 @@ class WebSocketHandler:
             and transport_owner is not owner_marker
             and transport_owner is not grant.websocket
         )
+        settlement_failed = False
+        settlement_cancelled = None
         if transport_owner_lost:
             settled = False
         else:
-            settled = await settle_generation(context)
+            try:
+                settled = await settle_generation(context)
+            except asyncio.CancelledError as error:
+                settled = False
+                settlement_cancelled = error
+            except Exception as error:
+                logger.warning(
+                    "Assistant output settlement failed closed: %s",
+                    type(error).__name__,
+                )
+                settled = False
+                settlement_failed = True
         if grant is None:
-            return True
+            if settlement_cancelled is not None:
+                raise settlement_cancelled
+            return settled is not False
         if settled is not False and not transport_owner_lost:
             return True
+        owner_was_current = (
+            tuple(self._websockets) == (grant.websocket,)
+            and self._active_session_nonce == grant.session_nonce
+        )
+        self._detach_unsettled_output_owner(grant)
+        if owner_was_current and (settlement_failed or settlement_cancelled is not None):
+            closed = await self._retire_transport_client(grant.websocket)
+            self._mark_socket_retired(grant.websocket)
+            if closed:
+                self._notify_socket_retired(grant.websocket)
+            else:
+                self._remember_uncertain_socket(grant.websocket)
+        if settlement_cancelled is not None:
+            raise settlement_cancelled
+        return False
+
+    def _detach_unsettled_output_owner(self, grant: _AssistantOutputGrant) -> None:
         if (
             tuple(self._websockets) == (grant.websocket,)
             and self._active_session_nonce == grant.session_nonce
@@ -1155,7 +1198,6 @@ class WebSocketHandler:
             self._silent_close_context = None
             self._physical_wake_deadline = 0.0
             self._mark_socket_retired(grant.websocket)
-        return False
 
     async def _cancel_retired_assistant_output(
         self,
@@ -1978,6 +2020,7 @@ class WebSocketHandler:
             self._wake_session_nonce = None
             self._physical_wake_deadline = 0.0
             self._request_follow_up_answer_grant = None
+            self._open_follow_up_phase_grant = None
             self._silent_close_context = None
             self._request_follow_up_budget_spent = True
             self._request_follow_up_budget_tool_call_id = None
@@ -1997,6 +2040,7 @@ class WebSocketHandler:
                 self._active_session_nonce = None
                 self._physical_wake_deadline = 0.0
                 self._request_follow_up_answer_grant = None
+                self._open_follow_up_phase_grant = None
                 self._silent_close_context = None
                 await self._retire_transport_client(transaction.websocket)
                 raise
@@ -2106,6 +2150,7 @@ class WebSocketHandler:
             self._device_audio_generation = None
             self._physical_wake_deadline = 0.0
             self._request_follow_up_answer_grant = None
+            self._open_follow_up_phase_grant = None
             self._silent_close_context = None
         retired_cancellation_keys = []
         for key, pending in self._request_follow_up_cancellations.items():
@@ -2133,13 +2178,12 @@ class WebSocketHandler:
     ) -> bool:
         """Unadmit and close the exact socket whose control state is ambiguous."""
         async with self._socket_transition_lock:
+            retired_output = None
             if (
                 websocket in self._websockets
                 and self._active_session_nonce == session_nonce
             ):
                 retired_output = self._retire_assistant_output_grant()
-                await self._settle_retired_assistant_output(retired_output)
-                await self._cancel_retired_assistant_output(retired_output)
                 self._set_serializer_audio_admitted(False)
                 self._websockets.discard(websocket)
                 self._active_session_nonce = None
@@ -2148,8 +2192,11 @@ class WebSocketHandler:
                 self._request_follow_up_budget_spent = True
                 self._request_follow_up_budget_tool_call_id = None
                 self._request_follow_up_answer_grant = None
+                self._open_follow_up_phase_grant = None
                 self._silent_close_context = None
                 self._physical_wake_deadline = 0.0
+            await self._settle_retired_assistant_output(retired_output)
+            await self._cancel_retired_assistant_output(retired_output)
             closed = await self._retire_transport_client(websocket)
             self._mark_socket_retired(websocket)
             if closed:
@@ -2323,10 +2370,11 @@ class WebSocketHandler:
                 ):
                     return False
                 self._device_audio_generation = None
+                self._open_follow_up_phase_grant = None
                 retired_output = self._retire_assistant_output_grant()
-                await self._settle_retired_assistant_output(retired_output)
                 self.invalidate_request_follow_up_turn(send_cancel=False)
                 self.cancel_graceful_close_request()
+                await self._settle_retired_assistant_output(retired_output)
             await self._cancel_retired_assistant_output(retired_output)
             try:
                 await self._clear_device_input_or_retire(str(reason))
@@ -2350,9 +2398,10 @@ class WebSocketHandler:
                 ):
                     return False
                 self._device_audio_generation = None
+                self._open_follow_up_phase_grant = None
                 retired_output = self._retire_assistant_output_grant()
-                await self._settle_retired_assistant_output(retired_output)
                 self.invalidate_request_follow_up_turn(send_cancel=False)
+                await self._settle_retired_assistant_output(retired_output)
                 return True
         return False
 
@@ -2516,6 +2565,8 @@ class WebSocketHandler:
                     raise RuntimeError("Silent close lost its physical wake owner")
                 self._device_audio_generation = None
                 sent = await self._send_silent_close_terminal_idle_locked(context)
+                if sent:
+                    self._open_follow_up_phase_grant = None
             if not sent:
                 raise RuntimeError("Silent close could not deliver final idle")
         except BaseException:
@@ -2556,6 +2607,7 @@ class WebSocketHandler:
             self._request_follow_up_budget_spent = True
             self._request_follow_up_budget_tool_call_id = None
             self._request_follow_up_answer_grant = None
+            self._open_follow_up_phase_grant = None
             return False
 
         if wake_generation is None:
@@ -2579,6 +2631,7 @@ class WebSocketHandler:
         # local follow-up grant was already revoked before this message was sent.
         self.invalidate_request_follow_up_turn(send_cancel=False)
         self._retire_assistant_output_grant()
+        self._open_follow_up_phase_grant = None
         self._device_wake_generation = wake_generation
         self._device_audio_generation = wake_generation
         self._wake_session_socket = sockets[0]
@@ -2839,6 +2892,16 @@ class WebSocketHandler:
             if valid
             else None
         )
+        self._open_follow_up_phase_grant = (
+            _OpenFollowUpPhaseGrant(
+                websocket=reservation.websocket,
+                session_nonce=reservation.session_nonce,
+                wake_generation=reservation.wake_generation,
+                token=reservation.token,
+            )
+            if valid
+            else None
+        )
         return valid
 
     def _bounded_follow_up_expiry(self, ttl_s: float) -> float:
@@ -2948,6 +3011,21 @@ class WebSocketHandler:
             == grant.non_close_tool_generation
             and TURN_LIVENESS.non_close_tool_generation
             == grant.non_close_tool_generation
+            and not self._silent_close_is_current()
+        )
+
+    def _open_follow_up_phase_grant_is_current(
+        self,
+        grant: _OpenFollowUpPhaseGrant,
+    ) -> bool:
+        """Keep physical OPEN progression separate from spent tool authority."""
+        return (
+            self._physical_wake_is_current()
+            and tuple(self._websockets) == (grant.websocket,)
+            and self._active_session_nonce == grant.session_nonce
+            and self._wake_session_socket is grant.websocket
+            and self._wake_session_nonce == grant.session_nonce
+            and self._device_wake_generation == grant.wake_generation
             and not self._silent_close_is_current()
         )
 
@@ -3831,10 +3909,11 @@ class WebSocketHandler:
             or self._silent_close_is_current()
         ):
             return None
-        grant = self._request_follow_up_answer_grant
+        grant = self._open_follow_up_phase_grant
         follow_up_token = (
             grant.token
-            if grant is not None and self._follow_up_answer_grant_is_current(grant)
+            if grant is not None
+            and self._open_follow_up_phase_grant_is_current(grant)
             else None
         )
         return _PhaseAuthorizationContext(
@@ -3843,6 +3922,7 @@ class WebSocketHandler:
             wake_generation=wake_generation,
             follow_up_epoch=self._request_follow_up_epoch,
             follow_up_token=follow_up_token,
+            terminal_idle=False,
         )
 
     def capture_terminal_idle_phase_authorization_context(
@@ -3858,6 +3938,7 @@ class WebSocketHandler:
             wake_generation=context.wake_generation,
             follow_up_epoch=context.follow_up_epoch,
             follow_up_token=None,
+            terminal_idle=True,
         )
 
     async def _send_phase_for_context(
@@ -3868,6 +3949,7 @@ class WebSocketHandler:
         wake_generation: int,
         follow_up_token: Optional[int] = None,
         follow_up_epoch: Optional[int] = None,
+        terminal_idle: bool = False,
     ) -> bool:
         """Send a phase only while its exact physical wake context remains current."""
         async with self._socket_transition_lock:
@@ -3878,6 +3960,7 @@ class WebSocketHandler:
                 wake_generation,
                 follow_up_token,
                 follow_up_epoch,
+                terminal_idle,
             )
 
     async def _send_phase_for_context_locked(
@@ -3888,6 +3971,7 @@ class WebSocketHandler:
         wake_generation: int,
         follow_up_token: Optional[int] = None,
         follow_up_epoch: Optional[int] = None,
+        terminal_idle: bool = False,
     ) -> bool:
         context = _PhaseAuthorizationContext(
             websocket=websocket,
@@ -3899,6 +3983,7 @@ class WebSocketHandler:
                 else follow_up_epoch
             ),
             follow_up_token=follow_up_token,
+            terminal_idle=terminal_idle,
         )
         if not self._phase_authorization_context_is_current(context):
             return False
@@ -3966,12 +4051,15 @@ class WebSocketHandler:
             or self._silent_close_is_current()
         ):
             return False
-        grant = self._request_follow_up_answer_grant
+        grant = self._open_follow_up_phase_grant
         current_follow_up_token = (
             grant.token
-            if grant is not None and self._follow_up_answer_grant_is_current(grant)
+            if grant is not None
+            and self._open_follow_up_phase_grant_is_current(grant)
             else None
         )
+        if context.terminal_idle:
+            return context.follow_up_token is None
         return context.follow_up_token == current_follow_up_token
 
     async def broadcast_phase(
@@ -3983,10 +4071,15 @@ class WebSocketHandler:
         """Send one generation-bound va_client phase to the admitted device."""
         async with self._socket_transition_lock:
             if context is None:
-                context = self.capture_phase_authorization_context()
+                context = (
+                    self.capture_terminal_idle_phase_authorization_context()
+                    if value == "idle"
+                    else self.capture_phase_authorization_context()
+                )
             if (
                 context is None
                 or not self._phase_authorization_context_is_current(context)
+                or context.terminal_idle != (value == "idle")
             ):
                 return False
             if preserve_output and (
@@ -4006,14 +4099,30 @@ class WebSocketHandler:
             if value in {"thinking", "replying", "idle"}:
                 self._device_audio_generation = None
             logger.info(f"➡️ broadcast phase '{value}' to {len(self._websockets)} device(s)")
-            return await self._send_phase_for_context_locked(
+            sent = await self._send_phase_for_context_locked(
                 context.websocket,
                 value,
                 context.session_nonce,
                 context.wake_generation,
                 context.follow_up_token,
                 context.follow_up_epoch,
+                context.terminal_idle,
             )
+            if sent:
+                grant = self._open_follow_up_phase_grant
+                if (
+                    grant is not None
+                    and self._open_follow_up_phase_grant_is_current(grant)
+                    and (
+                        (
+                            value == "replying"
+                            and context.follow_up_token == grant.token
+                        )
+                        or (value == "idle" and context.terminal_idle)
+                    )
+                ):
+                    self._open_follow_up_phase_grant = None
+            return sent
     
     def setup_event_handlers(
         self,
@@ -4069,6 +4178,7 @@ class WebSocketHandler:
                         self._active_session_nonce = None
                         self._physical_wake_deadline = 0.0
                         self._request_follow_up_answer_grant = None
+                        self._open_follow_up_phase_grant = None
                         self._silent_close_context = None
                         self._set_serializer_audio_admitted(False)
                     pending = self._hello_transaction
@@ -4121,9 +4231,10 @@ class WebSocketHandler:
     
     async def cleanup(self):
         """Cleanup WebSocket handler resources."""
+        self._set_serializer_audio_admitted(False)
+        self._device_audio_generation = None
+        self._open_follow_up_phase_grant = None
         retired_output = self._retire_assistant_output_grant()
-        await self._settle_retired_assistant_output(retired_output)
-        await self._cancel_retired_assistant_output(retired_output)
         hello_timeout_task = self._hello_timeout_task
         follow_up_expiry_task = self._request_follow_up_expiry_task
         self._clear_hello_transaction()
@@ -4132,6 +4243,8 @@ class WebSocketHandler:
         except Exception as error:
             self._enter_follow_up_fail_closed("cleanup could not schedule revocation")
             logger.warning("Follow-up cleanup entered fail-closed retirement: %r", error)
+        await self._settle_retired_assistant_output(retired_output)
+        await self._cancel_retired_assistant_output(retired_output)
         await asyncio.sleep(0)
         follow_up_tasks = list(self._request_follow_up_tasks)
         if (
@@ -4160,6 +4273,7 @@ class WebSocketHandler:
         self._request_follow_up_cancellations.clear()
         self._physical_wake_deadline = 0.0
         self._request_follow_up_answer_grant = None
+        self._open_follow_up_phase_grant = None
         self._silent_close_context = None
         if hello_timeout_task is not None and not hello_timeout_task.done():
             await asyncio.gather(hello_timeout_task, return_exceptions=True)

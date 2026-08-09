@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "openai-realtime-voice-agent"
-version = "0.22.1"
+version = "0.22.2"
 description = "Home Assistant addon for OpenAI Realtime API voice control with WebSocket support using Pipecat"
 authors = ["Your Name <your.email@example.com>"]
 packages = [{include = "app", from = "."}]

@@ -3302,6 +3302,357 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(media_check.await_count, 7)
         handler.cancel_request_follow_up()
 
+    async def test_successor_reservation_keeps_previous_open_token_until_replying(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(
+            follow_up_ms=0,
+            media_activity_check=AsyncMock(
+                return_value=websocket_handler.MediaActivity.CLEAR
+            ),
+        )
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+
+        previous_token = None
+        for number in range(1, 4):
+            tool_call_id = f"request-{number}"
+            stale_context = (
+                handler.capture_phase_authorization_context()
+                if previous_token is not None
+                else None
+            )
+            self.assertEqual(
+                await self._reserve(handler, tool_call_id),
+                websocket_handler.FollowUpReservationOutcome.RESERVED,
+            )
+            reservation = cast(Any, handler._request_follow_up_reservation)
+            self.assertNotEqual(reservation.token, previous_token)
+
+            if previous_token is not None:
+                self.assertIsNotNone(stale_context)
+                stale_context = cast(Any, stale_context)
+                self.assertEqual(stale_context.follow_up_token, previous_token)
+                self.assertLess(stale_context.follow_up_epoch, reservation.epoch)
+                sent_before_stale = websocket.send.await_count
+                self.assertFalse(
+                    await handler.broadcast_phase("replying", stale_context)
+                )
+                self.assertEqual(websocket.send.await_count, sent_before_stale)
+
+            self._activate(handler, tool_call_id)
+            response_id = f"question-{number}"
+            self.assertTrue(
+                handler.arm_request_follow_up_continuation({tool_call_id})
+            )
+            handler.bind_request_follow_up_response(response_id)
+            handler.note_request_follow_up_response_audio(response_id)
+            handler.note_assistant_playback_started()
+
+            if previous_token is not None:
+                replying_context = handler.capture_phase_authorization_context()
+                self.assertIsNotNone(replying_context)
+                replying_context = cast(Any, replying_context)
+                self.assertEqual(replying_context.follow_up_token, previous_token)
+                self.assertEqual(replying_context.follow_up_epoch, reservation.epoch)
+                self.assertTrue(
+                    await handler.broadcast_phase("replying", replying_context)
+                )
+                replying = json.loads(websocket.send.await_args_list[-1].args[0])
+                self.assertEqual(replying["type"], "phase")
+                self.assertEqual(replying["value"], "replying")
+                self.assertEqual(replying["token"], previous_token)
+                self.assertNotEqual(replying["token"], reservation.token)
+                self.assertIsNone(handler._open_follow_up_phase_grant)
+
+            handler.note_request_follow_up_response_done(response_id, "completed")
+            request, _commit = await self._open_requested_follow_up(
+                handler,
+                websocket,
+            )
+            self.assertEqual(request["token"], reservation.token)
+            handler.note_request_follow_up_turn_boundary()
+            item_id = f"answer-{number}"
+            self.assertTrue(
+                handler.bind_request_follow_up_answer(item_id, number)
+            )
+            self.assertTrue(
+                handler.confirm_request_follow_up_answer(
+                    item_id,
+                    number,
+                    f"answer {number}",
+                )
+            )
+            previous_token = reservation.token
+
+        handler.invalidate_request_follow_up_turn(send_cancel=False)
+
+    async def test_media_denial_preserves_previous_open_token_for_replying(self):
+        websocket = _FakeDeviceWebSocket()
+        media_check = AsyncMock(return_value=websocket_handler.MediaActivity.CLEAR)
+        handler = websocket_handler.WebSocketHandler(
+            follow_up_ms=0,
+            media_activity_check=media_check,
+        )
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+
+        await self._open_and_confirm_answer(handler, websocket)
+        phase_grant = cast(Any, handler._open_follow_up_phase_grant)
+        self.assertIsNotNone(phase_grant)
+        media_check.return_value = websocket_handler.MediaActivity.ACTIVE
+
+        self.assertEqual(
+            await self._reserve(handler, "denied-successor"),
+            websocket_handler.FollowUpReservationOutcome.REQUIRES_WAKE,
+        )
+        self.assertIsNone(handler._request_follow_up_reservation)
+        self.assertIsNone(handler._request_follow_up_answer_grant)
+        self.assertIs(handler._open_follow_up_phase_grant, phase_grant)
+
+        handler.note_assistant_playback_started()
+        context = handler.capture_phase_authorization_context()
+        self.assertIsNotNone(context)
+        context = cast(Any, context)
+        self.assertEqual(context.follow_up_token, phase_grant.token)
+        self.assertTrue(await handler.broadcast_phase("replying", context))
+        replying = json.loads(websocket.send.await_args_list[-1].args[0])
+        self.assertEqual(replying["token"], phase_grant.token)
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+
+    async def test_terminal_idle_consumes_open_phase_grant_without_a_token(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        await self._open_and_confirm_answer(handler, websocket)
+
+        self.assertIsNotNone(handler._open_follow_up_phase_grant)
+        terminal = handler.capture_terminal_idle_phase_authorization_context()
+        self.assertIsNotNone(terminal)
+        terminal = cast(Any, terminal)
+        self.assertTrue(terminal.terminal_idle)
+        self.assertIsNone(terminal.follow_up_token)
+        self.assertTrue(await handler.broadcast_phase("idle"))
+        payload = json.loads(websocket.send.await_args_list[-1].args[0])
+        self.assertEqual(
+            payload,
+            {
+                "type": "phase",
+                "value": "idle",
+                "session_nonce": handler._active_session_nonce,
+                "wake_generation": handler._device_wake_generation,
+            },
+        )
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+
+    async def test_stale_terminal_idle_cannot_cross_successor_reservation_epoch(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        await self._open_and_confirm_answer(handler, websocket)
+
+        terminal = handler.capture_terminal_idle_phase_authorization_context()
+        self.assertIsNotNone(terminal)
+        self.assertEqual(
+            await self._reserve(handler, "successor"),
+            websocket_handler.FollowUpReservationOutcome.RESERVED,
+        )
+        sent_before = websocket.send.await_count
+
+        self.assertFalse(await handler.broadcast_phase("idle", terminal))
+        self.assertEqual(websocket.send.await_count, sent_before)
+        handler.invalidate_request_follow_up_turn(send_cancel=False)
+
+    async def test_recovery_revokes_open_phase_grant_before_idle_delivery(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        await self._open_and_confirm_answer(handler, websocket)
+        self.assertIsNotNone(handler._open_follow_up_phase_grant)
+
+        handler._on_connection_recovery_started()
+
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+        websocket.send.side_effect = RuntimeError("idle delivery failed")
+        self.assertFalse(await handler.broadcast_phase("idle"))
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+
+    async def test_client_revoke_clears_open_phase_grant(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        session_nonce = self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        await self._open_and_confirm_answer(handler, websocket)
+        self.assertIsNotNone(handler._open_follow_up_phase_grant)
+
+        await handler._handle_device_control_message(
+            {
+                "type": "client_revoke",
+                "session_nonce": session_nonce,
+                "wake_generation": handler._device_wake_generation,
+                "reason": "malformed_phase",
+            },
+            websocket,
+        )
+
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+        self.assertIsNone(handler._request_follow_up_answer_grant)
+        context = handler.capture_phase_authorization_context()
+        self.assertIsNotNone(context)
+        self.assertIsNone(cast(Any, context).follow_up_token)
+
+    async def test_client_revoke_clears_phase_grant_before_output_settlement(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        session_nonce = self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        await self._open_and_confirm_answer(handler, websocket)
+        self.assertIsNotNone(handler._open_follow_up_phase_grant)
+        settlement_started = asyncio.Event()
+        release_settlement = asyncio.Event()
+
+        async def blocked_settlement(_grant):
+            settlement_started.set()
+            await release_settlement.wait()
+
+        handler._retire_assistant_output_grant = Mock(return_value=object())
+        handler._settle_retired_assistant_output = AsyncMock(
+            side_effect=blocked_settlement
+        )
+
+        revoke = asyncio.create_task(
+            handler._handle_device_control_message(
+                {
+                    "type": "client_revoke",
+                    "session_nonce": session_nonce,
+                    "wake_generation": handler._device_wake_generation,
+                    "reason": "malformed_phase",
+                },
+                websocket,
+            )
+        )
+        await settlement_started.wait()
+
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+        self.assertIsNone(handler._request_follow_up_answer_grant)
+        self.assertTrue(handler._request_follow_up_budget_spent)
+        self.assertFalse(handler.silent_close_is_allowed())
+        with self.assertRaises(RuntimeError):
+            await handler.reserve_request_follow_up("racing-tool")
+
+        release_settlement.set()
+        await revoke
+
+    async def test_bound_socket_retirement_revokes_locally_before_failed_settlement(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        session_nonce = self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        await self._open_and_confirm_answer(handler, websocket)
+        handler.transport = types.SimpleNamespace(
+            retire_output_audio_generation=Mock(),
+            settle_output_audio_generation=AsyncMock(
+                side_effect=RuntimeError("settlement failed")
+            ),
+        )
+        handler._assistant_output_grant = websocket_handler._AssistantOutputGrant(
+            websocket=websocket,
+            session_nonce=session_nonce,
+            wake_generation=handler._device_wake_generation,
+            response_id="retired-response",
+            response_generation=1,
+            authority_epoch=handler._assistant_output_authority_epoch,
+        )
+
+        await handler._retire_bound_socket(websocket, session_nonce)
+
+        self.assertNotIn(websocket, handler._websockets)
+        self.assertIsNone(handler._active_session_nonce)
+        self.assertIsNone(handler._request_follow_up_answer_grant)
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+        self.assertFalse(handler._binary_audio_is_admitted(websocket))
+        self.assertGreaterEqual(websocket.close.await_count, 1)
+
+    async def test_client_revoke_closes_socket_when_output_settlement_fails(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        session_nonce = self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        await self._open_and_confirm_answer(handler, websocket)
+        handler.transport = types.SimpleNamespace(
+            retire_output_audio_generation=Mock(),
+            settle_output_audio_generation=AsyncMock(
+                side_effect=RuntimeError("settlement failed")
+            ),
+        )
+        handler._assistant_output_grant = websocket_handler._AssistantOutputGrant(
+            websocket=websocket,
+            session_nonce=session_nonce,
+            wake_generation=handler._device_wake_generation,
+            response_id="revoked-response",
+            response_generation=1,
+            authority_epoch=handler._assistant_output_authority_epoch,
+        )
+
+        await handler._handle_device_control_message(
+            {
+                "type": "client_revoke",
+                "session_nonce": session_nonce,
+                "wake_generation": handler._device_wake_generation,
+                "reason": "malformed_phase",
+            },
+            websocket,
+        )
+
+        self.assertNotIn(websocket, handler._websockets)
+        self.assertIsNone(handler._active_session_nonce)
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+        self.assertFalse(handler._binary_audio_is_admitted(websocket))
+        websocket.close.assert_awaited_once()
+
+    async def test_cleanup_clears_open_phase_grant(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        await self._open_and_confirm_answer(handler, websocket)
+        self.assertIsNotNone(handler._open_follow_up_phase_grant)
+
+        await handler.cleanup()
+
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+
+    async def test_cleanup_revokes_locally_before_failed_output_settlement(self):
+        websocket = _FakeDeviceWebSocket()
+        handler = websocket_handler.WebSocketHandler(follow_up_ms=0)
+        self._admit(handler, websocket)
+        self.assertTrue(handler.note_device_wake())
+        await self._open_and_confirm_answer(handler, websocket)
+        session_nonce = cast(int, handler._active_session_nonce)
+        handler.transport = types.SimpleNamespace(
+            retire_output_audio_generation=Mock(),
+            settle_output_audio_generation=AsyncMock(
+                side_effect=RuntimeError("settlement failed")
+            ),
+        )
+        handler._assistant_output_grant = websocket_handler._AssistantOutputGrant(
+            websocket=websocket,
+            session_nonce=session_nonce,
+            wake_generation=handler._device_wake_generation,
+            response_id="cleanup-response",
+            response_generation=1,
+            authority_epoch=handler._assistant_output_authority_epoch,
+        )
+
+        await handler.cleanup()
+
+        self.assertIsNone(handler._request_follow_up_answer_grant)
+        self.assertIsNone(handler._open_follow_up_phase_grant)
+        self.assertFalse(handler._binary_audio_is_admitted(websocket))
+        self.assertGreaterEqual(websocket.close.await_count, 1)
+
     async def test_follow_up_answer_confirmation_requires_exact_fresh_item_identity(self):
         websocket = _FakeDeviceWebSocket()
         handler = websocket_handler.WebSocketHandler(follow_up_ms=0)

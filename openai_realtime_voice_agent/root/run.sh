@@ -67,11 +67,11 @@ if [ -z "$OPENAI_API_KEY" ]; then
     exit 1
 fi
 if [ "$FOLLOW_UP_LISTEN_SECONDS" != "0" ]; then
-    bashio::log.error "follow_up_listen_seconds must be 0 for the 0.22.1 rapid pilot"
+    bashio::log.error "follow_up_listen_seconds must be 0 for the 0.22.2 rapid pilot"
     exit 1
 fi
 if [ -z "$NEARBY_MEDIA_PLAYERS" ]; then
-    bashio::log.error "nearby_media_players must list media_player.living_room_tv and media_player.living_room_tv_audio for the 0.22.1 rapid pilot"
+    bashio::log.error "nearby_media_players must list media_player.living_room_tv and media_player.living_room_tv_audio for the 0.22.2 rapid pilot"
     exit 1
 fi
 

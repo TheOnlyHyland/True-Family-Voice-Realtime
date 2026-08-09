@@ -26,7 +26,7 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: "Required when publish=true, for example v0.22.1"
+        description: "Required when publish=true, for example v0.22.2"
         required: false
         type: string
       source_commit:
@@ -34,7 +34,7 @@ on:
         required: false
         type: string
       pilot_firmware_source_only:
-        description: "Historical pilot switch; rejected when publishing 0.22.1"
+        description: "Historical pilot switch; rejected when publishing 0.22.2"
         required: true
         default: false
         type: boolean
@@ -46,7 +46,7 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: theonlyhyland/true-family-voice-realtime/openai-realtime-voice-agent
-  ADDON_VERSION: 0.22.1
+  ADDON_VERSION: 0.22.2
   FIRMWARE_RELEASE_BINDING: finalized
   FIRMWARE_RELEASE_VERSION: 0.20.0
   FIRMWARE_RELEASE_SOURCE_COMMIT: 36abf4ba861e2ca30968882311ed3b2562b47367
