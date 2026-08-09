@@ -8,11 +8,12 @@ A complete, from-zero walkthrough. You'll set up two halves:
 Plan ~30–45 minutes the first time. Later firmware updates require deliberately
 advancing the two pinned release references after reviewing the new release.
 
-> **The backend 0.22.0 firmware binding is finalized to exact firmware 0.20.0.**
-> Update and verify firmware first, then install backend 0.22.0 only from its
+> **The backend 0.22.1 firmware binding is finalized to exact firmware 0.20.0.**
+> Update and verify firmware first, then install backend 0.22.1 only from its
 > protected published image. Until that image and GitHub release exist, keep
-> using released backend 0.21.1. A source checkout is not deployable. Roll back
-> backend first and firmware second.
+> using released backend 0.21.1; firmware 0.20.0 then keeps ordinary wakes
+> available while explicit follow-up fails closed. A source checkout is not
+> deployable. Roll back backend first and firmware second.
 
 ```
 Home Assistant Voice PE          Home Assistant (your box)             Cloud
@@ -91,16 +92,17 @@ Before the first run, configure all required authority and media fences:
 | `openai_api_key` | your key |
 | `transcription_language` | your ISO code (e.g. `en`, `nl`) — optional but recommended |
 | `mcp_tool_allowlist` | the complete exact list of desired MCP and custom-script tools; empty exposes none |
-| `nearby_media_players` | the exact `media_player` IDs for the Living Room TV and Living Room Chromecast |
+| `nearby_media_power_entity` | `switch.living_room_tv_smart_switch` (optional; safely skips unavailable player reads only when exactly `off`) |
+| `nearby_media_players` | `media_player.living_room_tv,media_player.living_room_tv_audio` |
 
 Everything else can wait. The full reference — every option, its default, and when
 to change it — is in the [Configuration Reference](configuration.md).
 
-### 1.5 Use only the protected 0.22.0 release artifact
+### 1.5 Use only the protected 0.22.1 release artifact
 
-Save the configuration, but do **not** install or start backend 0.22.0 from a
+Save the configuration, but do **not** install or start backend 0.22.1 from a
 source checkout. Its binding is finalized to firmware 0.20.0, which must be
-updated and verified first. Install backend 0.22.0 only after the protected image
+updated and verified first. Install backend 0.22.1 only after the protected image
 and GitHub release exist; otherwise remain on released backend 0.21.1.
 
 ---
@@ -193,7 +195,7 @@ The device now boots with compatible firmware and waits for the backend.
 ### 2.5 Start the protected published backend
 
 Only after exact firmware 0.20.0 succeeds, install and start the protected
-published backend 0.22.0 image. If that release is not yet available, keep using
+published backend 0.22.1 image. If that release is not yet available, keep using
 released backend 0.21.1 rather than a source checkout. Click **Start** on the
 add-on and open the **Log** tab. A healthy start shows
 `✅ Fetched N MCP tools` and
@@ -211,7 +213,7 @@ add-on and open the **Log** tab. A healthy start shows
    → a wake chime plays and the ring shows **listening**.
 3. Ask for something you exposed, e.g. *"turn on the bedroom lamp"* → the ring shows
    **thinking** → it acts and replies.
-4. Ordinary replies close the mic. In 0.22.0, the assistant may request one
+4. Ordinary replies close the mic. In 0.22.1, the assistant may request one
    useful no-wake question at a time and continue again after each genuine
    answer within the same 120-second physical wake. Missing, active, or uncertain
    nearby media keeps each requested window closed while conversation context

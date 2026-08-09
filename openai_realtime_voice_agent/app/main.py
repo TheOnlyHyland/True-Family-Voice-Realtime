@@ -80,6 +80,7 @@ from app.tts_announcer import DeviceAnnouncer
 from app.conversation_window import ConversationTurn, ConversationWindow
 from app.media_activity import (
     NearbyMediaActivityGuard,
+    parse_nearby_media_power_entity,
     parse_nearby_media_players,
 )
 
@@ -160,19 +161,19 @@ def append_rapid_pilot_policy(instructions: str) -> str:
 
 
 def parse_rapid_pilot_follow_up_seconds(value: Any) -> int:
-    """Require the only supported 0.22.0 microphone mode."""
+    """Require the only supported 0.22.1 microphone mode."""
     if type(value) is int:
         seconds = value
     elif isinstance(value, str) and value.strip() == "0":
         seconds = 0
     else:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 exactly for the 0.22.0 rapid pilot; "
+            "follow_up_listen_seconds must be 0 exactly for the 0.22.1 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     if seconds != 0:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 for the 0.22.0 rapid pilot; "
+            "follow_up_listen_seconds must be 0 for the 0.22.1 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     return 0
@@ -186,11 +187,11 @@ def validate_rapid_pilot_prerequisites(
     """Keep startup mode, tool exposure, and policy prerequisites identical."""
     if turn_detection_type != "semantic_vad" or not backend_owned_response_creation:
         raise ValueError(
-            "The 0.22.0 rapid pilot requires managed semantic_vad response creation"
+            "The 0.22.1 rapid pilot requires managed semantic_vad response creation"
         )
     if max_context_messages <= 0:
         raise ValueError(
-            "The 0.22.0 rapid pilot requires max_context_messages greater than 0"
+            "The 0.22.1 rapid pilot requires max_context_messages greater than 0"
         )
 
 
@@ -201,8 +202,8 @@ def validate_selective_follow_up_media_scope(
     """Require an administrator-fixed media fence before exposing follow-up."""
     if request_follow_up_supported and not nearby_media_players:
         raise ValueError(
-            "nearby_media_players must contain the exact Living Room TV and "
-            "Chromecast media_player entity IDs for the 0.22.0 rapid pilot"
+            "nearby_media_players must contain media_player.living_room_tv and "
+            "media_player.living_room_tv_audio for the 0.22.1 rapid pilot"
         )
 
 
@@ -3570,6 +3571,7 @@ class Application:
         self.follow_up_ms = 0
         self.request_follow_up_supported = False
         self.nearby_media_players: tuple[str, ...] = ()
+        self.nearby_media_power_entity = ""
         self.enable_voice_memory = False
         
     async def initialize(self) -> None:
@@ -3677,6 +3679,9 @@ class Application:
         nearby_media_players = parse_nearby_media_players(
             os.environ.get("NEARBY_MEDIA_PLAYERS", "")
         )
+        nearby_media_power_entity = parse_nearby_media_power_entity(
+            os.environ.get("NEARBY_MEDIA_POWER_ENTITY", "")
+        )
         
         # Web search: let the assistant look things up online (weather, news,
         # facts). ON by default; existing installs keep their saved option, so an
@@ -3696,7 +3701,7 @@ class Application:
             os.environ.get("ENABLE_VOICE_MEMORY", "false").lower() == "true"
         )
         
-        # Version 0.22.0 is the serial explicit-follow-up pilot. Automatic mode
+        # Version 0.22.1 is the serial explicit-follow-up pilot. Automatic mode
         # is intentionally rejected rather than silently changing saved intent.
         follow_up_listen_seconds = parse_rapid_pilot_follow_up_seconds(
             os.environ.get("FOLLOW_UP_LISTEN_SECONDS", "0")
@@ -3785,6 +3790,7 @@ class Application:
         nearby_media_guard = NearbyMediaActivityGuard(
             nearby_media_players,
             access_token=ha_access_token,
+            power_entity_id=nearby_media_power_entity,
         )
 
         # Recording processors must exist before WebSocketHandler captures them
@@ -3909,6 +3915,7 @@ class Application:
         self.noise_reduction = noise_reduction
         self.mcp_tool_allowlist = mcp_tool_allowlist
         self.nearby_media_players = nearby_media_players
+        self.nearby_media_power_entity = nearby_media_power_entity
         self.mcp_client = mcp_client
         self.ha_access_token = ha_access_token
         self.enable_web_search = enable_web_search

@@ -73,7 +73,7 @@ configuration:
   follow_up_listen_seconds:
     name: "💬 Gesprek · Naluistermodus (moet 0 zijn)"
     description: >-
-      Versie 0.22.0 vereist 0: na gewone antwoorden sluit de microfoon en het
+      Versie 0.22.1 vereist 0: na gewone antwoorden sluit de microfoon en het
       model kan één naluistervenster aanvragen wanneer een volgende gespreksbeurt
       nuttig is. Na elk echt antwoord kan het opnieuw een venster aanvragen,
       zonder rondelimiet binnen de bestaande fysieke wake van 120 seconden. Een
@@ -187,12 +187,22 @@ configuration:
       toolnamen die de assistent mag gebruiken. Leeg betekent veilig geen MCP-
       tools. Neem voor de uitrol alle gewenste Home Assistant- en aangepaste
       scripttools expliciet over om volledige huisbediening te behouden.
+  nearby_media_power_entity:
+    name: "🏠 Home Assistant · Voedingsschakelaar mediaspelers"
+    description: >-
+      Optionele exacte lowercase switch-entiteits-ID die de mediaspelers voedt.
+      Gebruik voor deze installatie switch.living_room_tv_smart_switch. Exact
+      uit slaat spelerlezingen veilig over; exact aan vereist dat alle ingestelde
+      spelers inactief zijn. Ontbrekende, geweigerde, ongeldige, onbekende, niet
+      beschikbare of te trage voedingsstatus houdt de microfoon dicht. Leeg
+      behoudt alleen de spelercontroles. Het model ziet of bedient deze schakelaar
+      nooit.
   nearby_media_players:
     name: "🏠 Home Assistant · Mediaspelers in de buurt"
     description: >-
       Verplichte kommagescheiden media_player-entiteits-ID's bij deze Voice PE,
-      maximaal 16. Neem voor deze uitrol de exacte entiteits-ID's van de
-      woonkamer-tv en woonkamer-Chromecast op. Voor het reserveren en direct
+      maximaal 16. Gebruik media_player.living_room_tv en
+      media_player.living_room_tv_audio. Voor het reserveren en direct
       voor het openen van een
       aangevraagd naluistervenster controleert de add-on alleen deze exacte
       entiteiten. Afspelen, bufferen, aan, gepauzeerd, niet beschikbaar,
@@ -224,7 +234,7 @@ configuration:
     description: >-
       Hoeveel volledige, door de gebruiker gestarte beurten de assistent
       onthoudt. Toolaanroepen en resultaten blijven bij elkaar. Meer = beter
-      geheugen, maar ook hogere kosten. 12 is een goede balans. Versie 0.22.0
+      geheugen, maar ook hogere kosten. 12 is een goede balans. Versie 0.22.1
       vereist een waarde boven 0, zodat een aangevraagde gespreksbeurt na een
       nieuwe wake behouden blijft.
   transcription_model:
@@ -244,7 +254,7 @@ configuration:
     description: >-
       Hoe het einde van je vraag wordt herkend. Normaal NIET instellen: de
       assistent begrijpt dan zelf wanneer je zin af is (semantic_vad). Versie
-      0.22.0 weigert de oude "server_vad"-stiltetimer bij het opstarten.
+      0.22.1 weigert de oude "server_vad"-stiltetimer bij het opstarten.
   vad_threshold:
     name: "⚙️ Geavanceerd · server_vad: geluidsdrempel"
     description: >-
