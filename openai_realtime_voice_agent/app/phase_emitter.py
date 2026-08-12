@@ -105,6 +105,10 @@ class TurnLiveness:
         self.in_flight = max(0, self.in_flight - 1)
         self.last_activity = time.monotonic()
 
+    def model_activity(self) -> None:
+        """Record bounded model progress without implying audible output."""
+        self.last_activity = time.monotonic()
+
     def non_close_tool_started(self) -> None:
         self.last_non_close_tool_start = time.monotonic()
         self.non_close_tool_generation += 1

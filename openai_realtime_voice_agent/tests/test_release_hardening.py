@@ -1,7 +1,11 @@
 """Release, image-layout, privacy, and translation invariants."""
 
+import copy
 import hashlib
+import json
 import re
+import runpy
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -17,6 +21,9 @@ MODEL_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
     "speaker-recongition-models/nemo_en_titanet_large.onnx"
 )
+RELEASE_INTEGRITY = runpy.run_path(
+    str(BACKEND_ROOT / ".github" / "scripts" / "release_integrity.py")
+)
 
 
 def _read(path: Path) -> str:
@@ -24,6 +31,251 @@ def _read(path: Path) -> str:
 
 
 class ReleaseHardeningTests(unittest.TestCase):
+    def test_registry_absence_classification_is_explicit_and_secret_safe(self):
+        reference = "ghcr.io/example/backend-aarch64:0.22.5"
+        explicit = RELEASE_INTEGRITY["explicit_manifest_not_found"]
+        require_absent = RELEASE_INTEGRITY["require_manifest_absent"]
+        integrity_error = RELEASE_INTEGRITY["ReleaseIntegrityError"]
+
+        for error_text in (
+            f"no such manifest: {reference}\n",
+            "manifest unknown\n",
+            "manifest unknown: manifest unknown\n",
+            json.dumps(
+                {
+                    "errors": [
+                        {
+                            "code": "MANIFEST_UNKNOWN",
+                            "message": "manifest unknown",
+                        }
+                    ]
+                }
+            ),
+        ):
+            with self.subTest(error_text=error_text):
+                self.assertTrue(explicit(error_text, reference))
+                require_absent(
+                    reference,
+                    runner=lambda *args, **kwargs: subprocess.CompletedProcess(
+                        args=args,
+                        returncode=1,
+                        stderr=error_text,
+                    ),
+                )
+
+        for error_text in (
+            "unauthorized: bearer private-registry-token",
+            "toomanyrequests: rate limit exceeded",
+            "dial tcp: network is unreachable",
+            "",
+            f"no such manifest: {reference}\nunauthorized: private-registry-token",
+            json.dumps(
+                {
+                    "errors": [
+                        {"code": "MANIFEST_UNKNOWN"},
+                        {"code": "UNAUTHORIZED"},
+                    ]
+                }
+            ),
+        ):
+            with self.subTest(error_text=error_text):
+                self.assertFalse(explicit(error_text, reference))
+                with self.assertRaises(integrity_error) as raised:
+                    require_absent(
+                        reference,
+                        runner=lambda *args, **kwargs: subprocess.CompletedProcess(
+                            args=args,
+                            returncode=1,
+                            stderr=error_text,
+                        ),
+                    )
+                self.assertNotIn("private-registry-token", str(raised.exception))
+
+        with self.assertRaisesRegex(integrity_error, "Refusing to overwrite"):
+            require_absent(
+                reference,
+                runner=lambda *args, **kwargs: subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stderr="",
+                ),
+            )
+
+    def test_release_evidence_schema_and_identity_are_exact(self):
+        build_evidence = RELEASE_INTEGRITY["build_evidence"]
+        validate_evidence = RELEASE_INTEGRITY["validate_evidence"]
+        integrity_error = RELEASE_INTEGRITY["ReleaseIntegrityError"]
+        identity = {
+            "version": "0.22.5",
+            "source_commit": "a" * 40,
+            "registry": "ghcr.io",
+            "image_name": (
+                "theonlyhyland/true-family-voice-realtime/"
+                "openai-realtime-voice-agent"
+            ),
+        }
+        evidence = build_evidence(
+            **identity,
+            digests={
+                "aarch64": "sha256:" + "1" * 64,
+                "amd64": "sha256:" + "2" * 64,
+            },
+        )
+
+        validate_evidence(evidence, **identity)
+        self.assertEqual(
+            set(evidence["images"]),
+            {"aarch64", "amd64"},
+        )
+        self.assertEqual(
+            evidence["images"]["aarch64"]["version_ref"],
+            "ghcr.io/theonlyhyland/true-family-voice-realtime/"
+            "openai-realtime-voice-agent-aarch64:0.22.5",
+        )
+        self.assertEqual(
+            evidence["images"]["amd64"]["source_ref"],
+            "ghcr.io/theonlyhyland/true-family-voice-realtime/"
+            f"openai-realtime-voice-agent-amd64:sha-{'a' * 40}",
+        )
+
+        invalid_documents = []
+        extra_field = copy.deepcopy(evidence)
+        extra_field["unexpected"] = True
+        invalid_documents.append(extra_field)
+        bad_digest = copy.deepcopy(evidence)
+        bad_digest["images"]["aarch64"]["manifest_digest"] = "sha256:short"
+        invalid_documents.append(bad_digest)
+        moved_ref = copy.deepcopy(evidence)
+        moved_ref["images"]["amd64"]["source_ref"] += "-moved"
+        invalid_documents.append(moved_ref)
+        missing_arch = copy.deepcopy(evidence)
+        del missing_arch["images"]["amd64"]
+        invalid_documents.append(missing_arch)
+        for document in invalid_documents:
+            with self.subTest(document=document):
+                with self.assertRaises(integrity_error):
+                    validate_evidence(document, **identity)
+
+    def test_release_evidence_requires_one_exact_successful_dispatch(self):
+        select_artifact = RELEASE_INTEGRITY["select_evidence_artifact"]
+        validate_run = RELEASE_INTEGRITY["validate_publication_run"]
+        integrity_error = RELEASE_INTEGRITY["ReleaseIntegrityError"]
+        source_commit = "b" * 40
+        artifact_name = (
+            "true-family-voice-backend-0.22.5-release-evidence-"
+            f"{source_commit}"
+        )
+        artifact = {
+            "expired": False,
+            "id": 101,
+            "name": artifact_name,
+            "workflow_run": {
+                "head_sha": source_commit,
+                "id": 202,
+            },
+        }
+        pages = [
+            {
+                "artifacts": [
+                    {**artifact, "expired": True, "id": 100},
+                    artifact,
+                ]
+            }
+        ]
+
+        self.assertEqual(
+            select_artifact(
+                pages,
+                name=artifact_name,
+                source_commit=source_commit,
+            ),
+            (101, 202),
+        )
+        duplicate = copy.deepcopy(pages)
+        duplicate[0]["artifacts"].append({**artifact, "id": 102})
+        for invalid_pages in (
+            [],
+            [{"artifacts": []}],
+            duplicate,
+            [
+                {
+                    "artifacts": [
+                        {
+                            **artifact,
+                            "workflow_run": {
+                                **artifact["workflow_run"],
+                                "head_sha": "c" * 40,
+                            },
+                        }
+                    ]
+                }
+            ],
+        ):
+            with self.subTest(invalid_pages=invalid_pages):
+                with self.assertRaises(integrity_error):
+                    select_artifact(
+                        invalid_pages,
+                        name=artifact_name,
+                        source_commit=source_commit,
+                    )
+
+        run = {
+            "conclusion": "success",
+            "event": "workflow_dispatch",
+            "head_sha": source_commit,
+            "id": 202,
+            "path": ".github/workflows/build-addon.yml",
+            "repository": {
+                "full_name": "TheOnlyHyland/True-Family-Voice-Realtime"
+            },
+            "status": "completed",
+        }
+        run_identity = {
+            "run_id": 202,
+            "repository": "TheOnlyHyland/True-Family-Voice-Realtime",
+            "source_commit": source_commit,
+            "workflow_path": ".github/workflows/build-addon.yml",
+        }
+        validate_run(run, **run_identity)
+        for field, bad_value in (
+            ("id", 203),
+            ("event", "push"),
+            ("status", "in_progress"),
+            ("conclusion", "failure"),
+            ("head_sha", "c" * 40),
+            ("path", ".github/workflows/other.yml"),
+        ):
+            invalid_run = copy.deepcopy(run)
+            invalid_run[field] = bad_value
+            with self.subTest(field=field):
+                with self.assertRaises(integrity_error):
+                    validate_run(invalid_run, **run_identity)
+        wrong_repository = copy.deepcopy(run)
+        wrong_repository["repository"]["full_name"] = "example/other"
+        with self.assertRaises(integrity_error):
+            validate_run(wrong_repository, **run_identity)
+
+    def test_current_release_changelog_covers_candidate_hardening(self):
+        changelog = _read(ADDON_ROOT / "CHANGELOG.md")
+        current = changelog.split("## 0.22.5\n", 1)[1].split(
+            "\n## 0.22.4\n",
+            1,
+        )[0]
+
+        for term in (
+            "assistant-output isolation",
+            "structural normalization",
+            "no-tools",
+            "release time",
+            "recovery fences",
+            "semantic silent-close veto",
+            "graceful close context-bound",
+            "terminal idle",
+            "firmware `0.20.1`",
+            "13ad7efe2df75f846f8fb48a939934db75efb5fd",
+        ):
+            self.assertIn(term, current)
+
     def test_production_image_installs_the_app_under_safe_path(self):
         dockerfile = _read(ADDON_ROOT / "Dockerfile")
         run_script = _read(ADDON_ROOT / "root" / "run.sh")
@@ -48,11 +300,12 @@ class ReleaseHardeningTests(unittest.TestCase):
         )
         for value in (LOCK_SHA256, MODEL_SHA256, AARCH64_BASE, AMD64_BASE):
             self.assertIn(value, workflow + dockerfile + build)
-        self.assertIn("ADDON_VERSION: 0.22.4", workflow)
-        self.assertIn("ARG BUILD_VERSION=0.22.4", dockerfile)
+        self.assertIn("ADDON_VERSION: 0.22.5", workflow)
+        self.assertIn("ARG BUILD_VERSION=0.22.5", dockerfile)
         self.assertIn("FIRMWARE_RELEASE_BINDING: finalized", workflow)
         self.assertNotIn("FIRMWARE_RELEASE_BINDING: pending", workflow)
         self.assertNotIn("REGRESSION_FIRMWARE_", workflow)
+        self.assertNotIn("pending_firmware_contract_version", workflow)
         self.assertIn("BUILD_REVISION=${{ github.sha }}", workflow)
         self.assertIn("org.opencontainers.image.revision", dockerfile)
         self.assertIn("io.true-family.voice.poetry-lock-sha256", dockerfile)
@@ -103,8 +356,8 @@ class ReleaseHardeningTests(unittest.TestCase):
             "Download exact smoked image artifacts",
             "environment: backend-production",
             'description: "Exact 40-character candidate commit to publish"',
-            'description: "Required when publish=true, for example v0.22.4"',
-            'description: "Historical pilot switch; rejected when publishing 0.22.4"',
+            'description: "Required when publish=true, for example v0.22.5"',
+            'description: "Historical pilot switch; rejected when publishing 0.22.5"',
             'test "$GITHUB_SHA" = "$SOURCE_COMMIT"',
             "Refuse immutable version or source-tag overwrite",
             "docker manifest inspect",
@@ -114,12 +367,27 @@ class ReleaseHardeningTests(unittest.TestCase):
             "Require finalized exact firmware release binding",
             "Checkout exact release firmware source commit",
             "Verify exact release firmware source checkout",
+            "Download and verify immutable release firmware package",
+            'RELEASE_URL="https://github.com/$FIRMWARE_RELEASE_REPOSITORY/releases/download/$FIRMWARE_RELEASE_VERSION"',
+            "manifest.json",
+            "true-family-voice-esp32s3.factory.bin",
+            "true-family-voice-esp32s3.ota.bin",
+            "true-family-voice-esp32s3.elf",
+            "SHA256SUMS",
             'test "$FIRMWARE_RELEASE_BINDING" = "finalized"',
-            'test "$FIRMWARE_RELEASE_VERSION" = "0.20.0"',
+            'test "$FIRMWARE_RELEASE_VERSION" = "0.20.1"',
             "FIRMWARE_RELEASE_SOURCE_COMMIT: "
-            "36abf4ba861e2ca30968882311ed3b2562b47367",
+            "13ad7efe2df75f846f8fb48a939934db75efb5fd",
             "FIRMWARE_RELEASE_MANIFEST_SHA256: "
-            "09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f",
+            "00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c",
+            "FIRMWARE_RELEASE_FACTORY_SHA256: "
+            "2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b",
+            "FIRMWARE_RELEASE_OTA_SHA256: "
+            "7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af",
+            "FIRMWARE_RELEASE_ELF_SHA256: "
+            "1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc",
+            "FIRMWARE_RELEASE_SHA256SUMS_SHA256: "
+            "05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2",
         ):
             self.assertIn(term, workflow)
         self.assertGreaterEqual(
@@ -148,6 +416,75 @@ class ReleaseHardeningTests(unittest.TestCase):
             _read(rootfs_smoke),
         )
 
+    def test_publication_evidence_gate_is_cross_run_and_digest_bound(self):
+        workflow = _read(BACKEND_ROOT / ".github" / "workflows" / "build-addon.yml")
+        publish_job = workflow.split("\n  publish:\n", 1)[1].split(
+            "\n  release-verify:\n",
+            1,
+        )[0]
+        release_job = workflow.split("\n  release-verify:\n", 1)[1]
+
+        self.assertIn(
+            "group: addon-${{ (github.event_name == 'release' && "
+            "github.event.release.tag_name) || (github.event_name == "
+            "'workflow_dispatch' && inputs.publish && inputs.release_tag) || "
+            "github.ref }}",
+            workflow,
+        )
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertEqual(
+            workflow.count('- ".github/scripts/release_integrity.py"'),
+            2,
+        )
+        self.assertIn(
+            "RELEASE_EVIDENCE_ARTIFACT: "
+            "true-family-voice-backend-0.22.5-release-evidence-${{ github.sha }}",
+            workflow,
+        )
+        self.assertIn(
+            "RELEASE_EVIDENCE_FILE: "
+            "true-family-voice-backend-0.22.5-release-evidence.json",
+            workflow,
+        )
+        self.assertIn("require-manifest-absent", publish_job)
+        self.assertNotIn(
+            'docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1',
+            publish_job,
+        )
+        for term in (
+            "Build machine-readable backend release evidence",
+            "write-evidence",
+            "Validate backend release evidence before upload",
+            "validate-evidence",
+            "Upload immutable backend release evidence",
+            "retention-days: 90",
+            "aarch64_digest=",
+            "amd64_digest=",
+        ):
+            self.assertIn(term, publish_job)
+
+        for term in (
+            "actions: read",
+            "Locate exact successful publication evidence",
+            "gh api --paginate",
+            "select-artifact",
+            "validate-publication-run",
+            '--source-commit "$GITHUB_SHA"',
+            '--workflow-path ".github/workflows/build-addon.yml"',
+            "Download exact publication evidence by artifact and run ID",
+            "artifact-ids: ${{ steps.locate-evidence.outputs.artifact_id }}",
+            "run-id: ${{ steps.locate-evidence.outputs.run_id }}",
+            "Validate exact publication evidence",
+            "RECORDED_DIGEST=",
+            'test "$VERSION_DIGEST" = "$RECORDED_DIGEST"',
+            'test "$SOURCE_DIGEST" = "$RECORDED_DIGEST"',
+        ):
+            self.assertIn(term, release_job)
+        self.assertNotIn(
+            'test "$VERSION_DIGEST" = "$SOURCE_DIGEST"',
+            release_job,
+        )
+
     def test_release_install_consumes_the_verified_architecture_image(self):
         config = _read(ADDON_ROOT / "config.yaml")
         release = _read(BACKEND_ROOT / "RELEASE.md")
@@ -161,14 +498,27 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("Rollback the backend first", release)
         self.assertIn("publish=true", release)
         self.assertIn("do not merge the version bump to `main` yet", release.lower())
-        self.assertIn("only after the images exist", release.lower())
-        self.assertIn("only then publish the github release", release.lower())
         self.assertIn("pilot_firmware_source_only=false", release)
         self.assertIn("Release-event", release)
+        self.assertIn("retained for 90 days", release)
+        self.assertIn("two moved tags must not validate a release", release)
+        self.assertIn("repository metadata advertising 0.22.5", release)
+        self.assertIn("advance to a new backend version", release)
+        self.assertIn("only an explicit manifest-not-found", release)
+        self.assertIn("ambiguous Docker failures abort publication", release)
         self.assertIn(
             "verification enforces the same public binding",
             release,
         )
+        candidate_ci = release.index("1. Commit the exact release candidate")
+        protected_publish = release.index("2. Manually dispatch")
+        create_release = release.index("5. Create tag `v0.22.5`")
+        release_verification = release.index("6. Wait for **Verify release")
+        merge_main = release.index("7. Only after release verification passes")
+        self.assertLess(candidate_ci, protected_publish)
+        self.assertLess(protected_publish, create_release)
+        self.assertLess(create_release, release_verification)
+        self.assertLess(release_verification, merge_main)
 
     def test_english_and_dutch_cover_every_schema_option(self):
         config = _read(ADDON_ROOT / "config.yaml")
@@ -198,7 +548,8 @@ class ReleaseHardeningTests(unittest.TestCase):
 
         self.assertIn("firmware first", docs)
         self.assertIn("backend first", docs)
-        self.assertIn("firmware 0.20.0", docs)
+        self.assertIn("firmware 0.20.1", docs)
+        self.assertIn("backend 0.22.5", docs)
         self.assertIn("backend 0.21.1", docs)
         self.assertIn("0.20.6", docs)
         self.assertIn("binding is finalized", docs)

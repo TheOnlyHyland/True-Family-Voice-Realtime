@@ -2,21 +2,21 @@
 
 ## Compatibility Order
 
-The exact Voice PE firmware binding for backend 0.22.4 is finalized:
+The exact Voice PE firmware binding for backend 0.22.5 is finalized:
 
-- Firmware version: `0.20.0`
+- Firmware version: `0.20.1`
 - Repository: `TheOnlyHyland/True-Family-Voice-Firmware`
-- Source commit: `36abf4ba861e2ca30968882311ed3b2562b47367`
+- Source commit: `13ad7efe2df75f846f8fb48a939934db75efb5fd`
 - Manifest SHA-256:
-  `09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f`
+  `00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c`
 - Factory image SHA-256:
-  `8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65`
+  `2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b`
 - OTA image SHA-256:
-  `a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38`
+  `7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af`
 - ELF SHA-256:
-  `9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88`
+  `1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc`
 - `SHA256SUMS` SHA-256:
-  `280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3`
+  `05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2`
 
 The workflow records `FIRMWARE_RELEASE_BINDING: finalized`. Publication and
 release jobs still fail closed unless every value above is exact, the public
@@ -24,8 +24,8 @@ firmware package matches every hash, and the checked-out source has the exact
 commit and version.
 
 > **Upgrade firmware first.** Keep the existing backend running, update and
-> verify exact firmware 0.20.0, then update to backend 0.22.4 only after its
-> protected images and GitHub release exist. Starting backend 0.22.4 before the
+> verify exact firmware 0.20.1, then update to backend 0.22.5 only after its
+> protected images and GitHub release exist. Starting backend 0.22.5 before the
 > firmware update succeeds is unsupported. A source checkout is not a release
 > artifact.
 
@@ -62,10 +62,23 @@ than a mutable tag. The gate runs the image's exact `CMD ["/run.sh"]` with
 installed module path, build labels, architecture, and exact runtime versions.
 Only after those checks does CI save and hash the exact image. A protected
 publication job loads that saved image, verifies the image ID and archive hash,
-and pushes it without rebuilding.
+and pushes it without rebuilding. After both architecture version and source tags
+are published, that same successful protected workflow records one validated
+machine-readable evidence artifact for backend 0.22.5. The artifact binds the
+candidate commit and exact aarch64/amd64 registry references to their SHA-256
+manifest digests and is retained for 90 days.
+
+Publication and release-event verification share one version/tag concurrency
+key even when they run from different Git refs. Normal push and pull-request CI
+remain keyed by their own refs. Release verification locates exactly one
+non-expired evidence artifact, proves its workflow run was a successful
+`workflow_dispatch` of this workflow at the release commit, and downloads it by
+its artifact and run IDs. Both current version and `sha-<commit>` tags must still
+resolve to each recorded architecture digest. Comparing the tags only to each
+other is insufficient because two moved tags must not validate a release.
 
 Every PR, manual, publication, and release test job checks out exact firmware
-0.20.0 source commit `36abf4ba861e2ca30968882311ed3b2562b47367` and validates the full source-level
+0.20.1 source commit `13ad7efe2df75f846f8fb48a939934db75efb5fd` and validates the full source-level
 protocol contract, including the tokenized `follow_up_progress_phase` shape.
 Prepared package assets are not assumed public during PR or non-publishing manual
 CI, so those jobs do not download or require them. Publication and release jobs
@@ -73,14 +86,14 @@ additionally download the immutable public package and require every finalized
 hash above. Package evidence is never allowed to replace exact source validation.
 
 The historical `pilot_firmware_source_only` workflow input is retained for
-auditability but cannot authorize a 0.22.4 image or public GitHub release. Every
-0.22.4 publication requires `pilot_firmware_source_only=false`, a finalized public
+auditability but cannot authorize a 0.22.5 image or public GitHub release. Every
+0.22.5 publication requires `pilot_firmware_source_only=false`, a finalized public
 firmware source commit, and every exact release-artifact hash. Release-event
 verification enforces the same public binding.
 
 ## Follow-Up Transaction Authenticity
 
-The finalized firmware 0.20.0 binding must implement the fixture's exact
+The finalized firmware 0.20.1 binding must implement the fixture's exact
 `follow_up_progress_phase` shape: `type`, `value`, `token`, `session_nonce`, and
 `wake_generation`. Initial physical-wake phases retain the existing trusted
 four-field shape, and the historical two-field phase remains legacy-only.
@@ -98,26 +111,45 @@ confirm the follow-up. Delayed historical transcripts, duplicate completion,
 recovery, socket replacement, and a new physical wake cannot confer authority on
 a later round.
 
+The generated follow-up question is a no-tools continuation: the Realtime
+request carries an empty tool list and `tool_choice: none`. Its held text,
+transcript, and PCM are released only while the exact response ID, response
+generation, reservation epoch, token, socket, session nonce, wake generation,
+and physical deadline still match. That authority is checked again around every
+await and every frame. A server-emitted function call in this mode is quarantined
+before dispatch and forces recovery.
+
 ## Silent Terminal Decision Gate
 
-For the response to one freshly confirmed follow-up answer, backend 0.22.4 holds
-text, audio transcript, and PCM for at most 500 ms or 48,000 PCM bytes. Normal
-speech is released after that bound; a separate 512-event cap prevents
-zero-length delta floods from bypassing the memory limit. Held output is
-discarded only after
-`response.done` proves one completed response with exactly one authorized
-`end_conversation` call, no mixed or pending tool work, and a still-current
-device-owned close grant. Tool execution then waits on that immutable terminal
-ledger before sending the silent close result.
+Backend 0.22.5 holds each managed response's text, audio transcript, and PCM until
+`response.done` establishes its exact terminal structure. The hold fails closed
+after 60 seconds, 3 MiB, or 4,096 events; reaching a bound discards the output and
+enters recovery rather than releasing a partial response. Ordinary valid speech
+is released only after its server output and local conversation projection agree.
 
-Every failed precondition releases the held output through the normal response
-path. Recovery discards the hold and retires the physical output generation
-immediately. This gate does not depend on prompting or on receiving tool-call
-events before audio deltas.
+An otherwise exact `request_follow_up` or `end_conversation` call accompanied by
+one unheard assistant message is normalized before dispatch: the assistant item
+must be deleted from OpenAI, confirmed deleted, removed from local history, and
+reprojected with the exact in-progress tool placeholder. Additional, ambiguous,
+malformed, pending, or unconfirmed output fails closed. A silent close is
+authorized only when the resulting immutable terminal ledger contains exactly
+one authorized `end_conversation` call, no pending tool work, and a still-current
+device-owned close grant.
+
+High-confidence gratitude, completion, decision, and cancellation answers veto
+the silent path. They receive one brief natural no-tools spoken acknowledgement
+instead. That continuation also carries `tools: []` and `tool_choice: none`; any
+function call is quarantined before dispatch. Unrelated answers remain eligible
+for exact sole-tool silent close.
+
+Recovery synchronously revokes physical output and held-output release authority,
+settles terminal and continuation waiters, rolls back unreleasable local output,
+and cancels normalization work. A stale release callback or recovery-raced
+transport bind cannot restore the old output grant.
 
 ## Response-Generation Audio Barrier
 
-Backend 0.22.4 binds each assistant PCM source frame, Pipecat chunker operation,
+Backend 0.22.5 binds each assistant PCM source frame, Pipecat chunker operation,
 queued chunk, adapter-owned partial buffer, and active WebSocket write to the exact admitted
 socket and `(response_id, response_generation)`. A tool continuation waits for
 response A to finish before it arms a follow-up or creates response B. The drain
@@ -136,9 +168,24 @@ response grant; a cancellation-resistant physical write therefore forces
 owner detachment and socket close or abort before failure returns, and no tool
 continuation may create response B on that path.
 
+## Context-Bound Graceful Close
+
+Graceful close uses one immutable `(websocket, session_nonce, wake_generation,
+token)` for PREPARE, COMMIT, ACK, and CANCEL. ACKs must match the exact physical
+socket, context, stage, and token. An exact negative ACK clears only its own
+transaction before failure is surfaced; stale ACKs cannot settle a replacement.
+
+A valid newer firmware wake is authoritative evidence that the old close owner
+was revoked. The backend burns the old pending, committed, expected-ACK, owner,
+and deferred state locally, settles its waiter, and sends no old-wake CANCEL into
+the new turn. Successful silent close sends tokenless terminal `idle` only to its
+still-current local socket/session/wake. If close fails, the socket is retired
+only while that exact triple still matches; a superseding wake remains admitted
+and untouched.
+
 ## Accepted Rapid-Pilot Privileges
 
-Version 0.22.4 deliberately inherits the pilot's `host_network: true`,
+Version 0.22.5 deliberately inherits the pilot's `host_network: true`,
 `homeassistant_api: true`, and read-write `/share` mount. These remain accepted
 deployment risks, not reduced-sandbox claims: a backend compromise can reach the
 host network, use the add-on's Home Assistant API credential, and alter the
@@ -167,23 +214,32 @@ The firmware binding is finalized, but publication remains protected and
 content-addressed. Execute this sequence only from the reviewed candidate after
 its normal CI passes; never treat a source checkout as an installable release.
 
-1. Commit the exact release candidate on a reviewed release branch and let its
+1. Commit the exact release candidate on a reviewed candidate branch and let its
    normal CI pass. Do not merge the version bump to `main` yet.
 2. Manually dispatch **Build and Publish Home Assistant Addon** from that exact
-   candidate commit with `publish=true`, `release_tag=v0.22.4`, and
+   candidate commit with `publish=true`, `release_tag=v0.22.5`, and
    `source_commit=<the same 40-character commit>`. Keep
    `pilot_firmware_source_only=false`.
 3. Approve its protected `backend-production` environment gate only after both
-   architecture build-and-smoke jobs pass.
-4. Record both architecture image digests printed by the workflow.
-5. Verify both version tags and both `sha-<commit>` tags resolve to those
-   digests.
-6. Only after the images exist, merge the identical candidate source to `main`.
-   This is the step that exposes the repository update to Home Assistant users.
-7. Tag the reviewed candidate commit `v0.22.4`; only then publish the GitHub release.
-   The release event is verification-only and must not build or push an image.
+   architecture build-and-smoke jobs pass. Require the publish job to finish
+   successfully with its unique backend 0.22.5 evidence artifact.
+4. Record both architecture image digests and verify the version and
+   `sha-<commit>` tags resolve to the evidence values.
+5. Create tag `v0.22.5` at that exact candidate commit and publish the GitHub
+   release. The release event is verification-only and must not build or push an
+   image.
+6. Wait for **Verify release uses pre-published immutable images** to pass. It
+   must prove the exact successful publication run and its recorded digests.
+7. Only after release verification passes, merge the identical candidate tree to
+   `main`. This is the step that exposes repository metadata advertising 0.22.5
+   to Home Assistant users; merging earlier is prohibited.
 
-The publication workflow refuses to overwrite either an existing `0.22.4` tag
+The publication workflow refuses to overwrite either an existing `0.22.5` tag
 or its source-commit tag. A partially published failed run must be investigated;
 do not delete or replace a successful architecture tag without treating that as
-a new release version.
+a new release version. A missing evidence artifact or failed release verification
+does not permit retrying over existing tags; advance to a new backend version.
+The registry preflight treats only an explicit manifest-not-found response as
+absence. Authentication, network, rate-limit, empty, mixed, or otherwise
+ambiguous Docker failures abort publication without printing captured registry
+diagnostics that could contain credentials.

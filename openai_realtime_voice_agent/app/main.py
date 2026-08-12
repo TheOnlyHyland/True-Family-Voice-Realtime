@@ -9,7 +9,7 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import AbstractSet, Any, Optional
 
 
@@ -47,10 +47,13 @@ from app.room_light_tool import (
 from app.end_conversation_tool import (
     END_CONVERSATION_TOOL_NAME,
     SilentCloseResultProperties,
+    SilentCloseAuthorization,
+    SpokenCloseVetoResultProperties,
     get_end_conversation_tool_definition,
     register_end_conversation_tool,
 )
 from app.request_follow_up_tool import (
+    REQUEST_FOLLOW_UP_PURPOSE,
     REQUEST_FOLLOW_UP_TOOL_NAME,
     get_request_follow_up_tool_definition,
     register_request_follow_up_tool,
@@ -105,12 +108,14 @@ DEFAULT_MAX_OUTPUT_TOKENS = 1200
 
 @dataclass
 class _DecisionOutputHold:
-    """Bounded output held only while a follow-up answer decision is unresolved."""
+    """Bounded output held while a tool-capable response is unresolved."""
 
     response_id: str
     response_generation: int
     user_item_id: str
-    user_item_sequence: int
+    user_item_sequence: Optional[int]
+    confirmed_follow_up_answer: bool
+    tool_disabled_mode: Optional[str] = None
     audio_frames: list[Any] = field(default_factory=list)
     text_events: list[tuple[str, Any]] = field(default_factory=list)
     audio_bytes: int = 0
@@ -119,7 +124,19 @@ class _DecisionOutputHold:
     released: bool = False
     discarded: bool = False
     started: bool = False
-    release_task: Optional[asyncio.Task] = None
+    stopped: bool = False
+    release_generation: int = 0
+    timeout_task: Optional[asyncio.Task] = None
+
+
+@dataclass(frozen=True)
+class _DecisionOutputReleaseAuthority:
+    """Exact capability for one held response in one realtime session."""
+
+    generation: int
+    session_generation: int
+    response_id: str
+    response_generation: int
 
 
 @dataclass(frozen=True)
@@ -129,10 +146,26 @@ class _TerminalResponseLedger:
     response_id: str
     response_generation: int
     status: Optional[str]
+    raw_output: tuple[dict[str, Any], ...]
     output: tuple[dict[str, Any], ...]
+    user_item_id: str
     decision_output_held: bool
     physical_audio_released: bool
+    held_output_discarded: bool
     generated_audio_discarded: bool
+    confirmed_follow_up_answer: bool
+    normalization_complete: bool = True
+    normalized_assistant_item_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _TerminalResponseNormalization:
+    """One exact unheard assistant item that must be deleted before dispatch."""
+
+    tool_call_id: str
+    function_name: str
+    assistant_item_id: str
+    ledger: _TerminalResponseLedger
 
 RAPID_PILOT_POLICY_MARKER = "RAPID-PILOT EXPLICIT FOLLOW-UP POLICY"
 RAPID_PILOT_POLICY_SUFFIX = f"""
@@ -164,19 +197,19 @@ def append_rapid_pilot_policy(instructions: str) -> str:
 
 
 def parse_rapid_pilot_follow_up_seconds(value: Any) -> int:
-    """Require the only supported 0.22.4 microphone mode."""
+    """Require the only supported 0.22.5 microphone mode."""
     if type(value) is int:
         seconds = value
     elif isinstance(value, str) and value.strip() == "0":
         seconds = 0
     else:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 exactly for the 0.22.4 rapid pilot; "
+            "follow_up_listen_seconds must be 0 exactly for the 0.22.5 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     if seconds != 0:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 for the 0.22.4 rapid pilot; "
+            "follow_up_listen_seconds must be 0 for the 0.22.5 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     return 0
@@ -190,11 +223,11 @@ def validate_rapid_pilot_prerequisites(
     """Keep startup mode, tool exposure, and policy prerequisites identical."""
     if turn_detection_type != "semantic_vad" or not backend_owned_response_creation:
         raise ValueError(
-            "The 0.22.4 rapid pilot requires managed semantic_vad response creation"
+            "The 0.22.5 rapid pilot requires managed semantic_vad response creation"
         )
     if max_context_messages <= 0:
         raise ValueError(
-            "The 0.22.4 rapid pilot requires max_context_messages greater than 0"
+            "The 0.22.5 rapid pilot requires max_context_messages greater than 0"
         )
 
 
@@ -206,7 +239,7 @@ def validate_selective_follow_up_media_scope(
     if request_follow_up_supported and not nearby_media_players:
         raise ValueError(
             "nearby_media_players must contain media_player.living_room_tv and "
-            "media_player.living_room_tv_audio for the 0.22.4 rapid pilot"
+            "media_player.living_room_tv_audio for the 0.22.5 rapid pilot"
         )
 
 
@@ -297,9 +330,9 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
 
     SESSION_READY_TIMEOUT_S = 10.0
     CONVERSATION_ITEM_TIMEOUT_S = 5.0
-    DECISION_AUDIO_HOLD_TIMEOUT_S = 0.5
-    DECISION_AUDIO_HOLD_MAX_BYTES = 48000
-    DECISION_OUTPUT_HOLD_MAX_EVENTS = 512
+    DECISION_OUTPUT_HOLD_TIMEOUT_S = 60.0
+    DECISION_OUTPUT_HOLD_MAX_BYTES = 3 * 1024 * 1024
+    DECISION_OUTPUT_HOLD_MAX_EVENTS = 4096
     MAX_SEEN_INPUT_SPEECH_ITEMS = 512
     RESPONSE_FINISHED_TIMEOUT_S = 60.0
     TURN_TERMINAL_TIMEOUT_S = 180.0
@@ -345,6 +378,9 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         self._turn_gate = asyncio.Lock()
         self._tool_execution_lock = asyncio.Lock()
         self._turn_tasks = set()
+        self._terminal_tasks = set()
+        self._terminal_tasks_drained = asyncio.Event()
+        self._terminal_tasks_drained.set()
         self._user_turn_tasks = {}
         self._replay_item_ids = set()
         self._replay_item_acks = {}
@@ -412,12 +448,17 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         self._request_follow_up_response_failed = None
         self._request_follow_up_continuation_arm = None
         self._request_follow_up_continuation_failed = None
+        self._request_follow_up_question_output_authorized = None
         self._assistant_output_response_created = None
         self._assistant_output_frame_created = None
         self._assistant_output_before_tool_continuation = None
-        self._silent_close_runtime_allowed = None
+        self._assistant_output_revoked = None
+        self._silent_close_spoken_response_allowed = None
         self._output_response_generation = 0
         self._active_output_response_context = None
+        self._pending_tool_disabled_response_mode = None
+        self._tool_disabled_response_modes = {}
+        self._tool_disabled_continuation_call_ids = set()
         self._tool_call_output_contexts = {}
         self._input_speech_sequence = 0
         self._follow_up_answer_item_sequences = {}
@@ -427,10 +468,15 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         self._confirmed_follow_up_answer_identity = None
         self._decision_output_hold: Optional[_DecisionOutputHold] = None
         self._decision_output_lock = asyncio.Lock()
+        self._decision_output_release_generation = 0
+        self._decision_output_release_authority: Optional[
+            _DecisionOutputReleaseAuthority
+        ] = None
         self._tool_call_response_contexts = {}
         self._response_tool_call_ids = {}
         self._terminal_response_ledgers = {}
         self._terminal_response_events = {}
+        self._ttfb_delivered_output_contexts = set()
 
     @staticmethod
     def _item_dict(item):
@@ -468,6 +514,19 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         task.add_done_callback(finish_turn_task)
         return task
 
+    def _track_terminal_task(self, coroutine):
+        task = self._track_turn_task(coroutine)
+        self._terminal_tasks.add(task)
+        self._terminal_tasks_drained.clear()
+
+        def finish_terminal_task(completed_task) -> None:
+            self._terminal_tasks.discard(completed_task)
+            if not self._terminal_tasks:
+                self._terminal_tasks_drained.set()
+
+        task.add_done_callback(finish_terminal_task)
+        return task
+
     def _track_user_turn_task(self, item_id: str, coroutine) -> None:
         task = self._track_turn_task(coroutine)
         self._user_turn_tasks[item_id] = task
@@ -487,6 +546,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         on_response_failed=None,
         on_continuation_arm=None,
         on_continuation_failed=None,
+        on_question_output_authorized=None,
     ) -> None:
         """Bind explicit follow-up state to authoritative OpenAI response events."""
         self._request_follow_up_response_created = on_response_created
@@ -495,6 +555,9 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         self._request_follow_up_response_failed = on_response_failed
         self._request_follow_up_continuation_arm = on_continuation_arm
         self._request_follow_up_continuation_failed = on_continuation_failed
+        self._request_follow_up_question_output_authorized = (
+            on_question_output_authorized
+        )
 
     def set_assistant_output_event_handlers(
         self,
@@ -502,6 +565,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         on_response_created=None,
         on_audio_frame=None,
         on_before_tool_continuation=None,
+        on_output_revoked=None,
     ) -> None:
         """Bind device output ownership to authoritative OpenAI responses."""
         self._assistant_output_response_created = on_response_created
@@ -509,10 +573,11 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         self._assistant_output_before_tool_continuation = (
             on_before_tool_continuation
         )
+        self._assistant_output_revoked = on_output_revoked
 
-    def set_silent_close_runtime_authorizer(self, authorizer) -> None:
-        """Bind the device-owned final gate used before discarding held output."""
-        self._silent_close_runtime_allowed = authorizer
+    def set_spoken_close_response_authorizer(self, authorizer) -> None:
+        """Bind the live grant check for a tool-disabled spoken close veto."""
+        self._silent_close_spoken_response_allowed = authorizer
 
     def bind_context_aggregator(self, aggregator_pair) -> None:
         assistant = aggregator_pair.assistant()
@@ -734,25 +799,56 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         self,
         response_id: str,
         response_generation: int,
-    ) -> None:
-        """Hold only the response to one freshly confirmed OPEN answer."""
+        *,
+        tool_disabled_mode: Optional[str] = None,
+    ) -> bool:
+        """Hold output until terminal facts prove it is safe to make audible."""
         context = (response_id, response_generation)
         self._response_tool_call_ids[context] = set()
         identity = self._confirmed_follow_up_answer_identity
         self._confirmed_follow_up_answer_identity = None
+        active_turn_id = self._conversation_window.active_turn_id
         if (
-            identity is None
-            or self._conversation_window.active_turn_id != identity[0]
+            not self._managed_context
+            or not active_turn_id
+            or (
+                tool_disabled_mode is None
+                and not (
+                    CONVERSATION_CONTROL_TOOL_NAMES & self._authorized_tool_names
+                )
+            )
         ):
-            return
+            return False
         if self._decision_output_hold is not None:
             raise RuntimeError("a prior follow-up decision output is still active")
-        self._decision_output_hold = _DecisionOutputHold(
+        confirmed_follow_up_answer = bool(
+            identity is not None and identity[0] == active_turn_id
+        )
+        hold = _DecisionOutputHold(
             response_id=response_id,
             response_generation=response_generation,
-            user_item_id=identity[0],
-            user_item_sequence=identity[1],
+            user_item_id=active_turn_id,
+            user_item_sequence=(
+                identity[1] if confirmed_follow_up_answer else None
+            ),
+            confirmed_follow_up_answer=confirmed_follow_up_answer,
+            tool_disabled_mode=tool_disabled_mode,
         )
+        self._decision_output_release_generation += 1
+        hold.release_generation = self._decision_output_release_generation
+        self._decision_output_release_authority = (
+            _DecisionOutputReleaseAuthority(
+                generation=hold.release_generation,
+                session_generation=self._session_generation,
+                response_id=response_id,
+                response_generation=response_generation,
+            )
+        )
+        self._decision_output_hold = hold
+        hold.timeout_task = self._track_terminal_task(
+            self._expire_decision_output_hold(hold)
+        )
+        return True
 
     def _decision_hold_matches(
         self,
@@ -761,21 +857,76 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
     ) -> bool:
         return context == (hold.response_id, hold.response_generation)
 
+    def _decision_output_release_is_current(
+        self,
+        hold: _DecisionOutputHold,
+        authority: _DecisionOutputReleaseAuthority,
+    ) -> bool:
+        return bool(
+            not self._recovery_active
+            and not hold.discarded
+            and self._decision_output_hold is hold
+            and self._decision_output_release_authority is authority
+            and self._decision_output_release_generation == authority.generation
+            and hold.release_generation == authority.generation
+            and self._session_generation == authority.session_generation
+            and hold.response_id == authority.response_id
+            and hold.response_generation == authority.response_generation
+        )
+
+    def _require_decision_output_release_authority(
+        self,
+        hold: _DecisionOutputHold,
+        authority: _DecisionOutputReleaseAuthority,
+    ) -> None:
+        if not self._decision_output_release_is_current(hold, authority):
+            raise RuntimeError("held response release authority was revoked")
+
+    def _revoke_decision_output_release_authority(
+        self,
+        hold: Optional[_DecisionOutputHold] = None,
+    ) -> None:
+        authority = self._decision_output_release_authority
+        if authority is None:
+            return
+        if (
+            hold is not None
+            and hold.release_generation != authority.generation
+        ):
+            return
+        self._decision_output_release_generation += 1
+        self._decision_output_release_authority = None
+
     async def _deliver_assistant_audio_frame(
         self,
         frame: Any,
         context: tuple[str, int],
+        *,
+        hold: Optional[_DecisionOutputHold] = None,
+        release_authority: Optional[_DecisionOutputReleaseAuthority] = None,
     ) -> bool:
+        def require_release_authority() -> None:
+            if hold is not None and release_authority is not None:
+                self._require_decision_output_release_authority(
+                    hold,
+                    release_authority,
+                )
+
+        require_release_authority()
         registrar = self._assistant_output_frame_created
         if registrar is None:
             return False
         try:
             registered = registrar(frame, *context)
+            require_release_authority()
             if inspect.isawaitable(registered):
                 registered = await registered
+                require_release_authority()
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if hold is not None and release_authority is not None:
+                require_release_authority()
             logger.warning(
                 "Assistant audio source registration failed (%s)",
                 error.__class__.__name__,
@@ -783,8 +934,44 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             return False
         if registered is not True:
             return False
+        require_release_authority()
         await self.push_frame(frame)
+        require_release_authority()
+        if context not in self._ttfb_delivered_output_contexts:
+            self._ttfb_delivered_output_contexts.add(context)
+            try:
+                await self.stop_ttfb_metrics()
+            except Exception as error:
+                logger.warning(
+                    "Could not stop physical-output TTFB metric (%s)",
+                    error.__class__.__name__,
+                )
+            require_release_authority()
         return True
+
+    async def _balance_decision_output_tts(
+        self,
+        hold: _DecisionOutputHold,
+        *,
+        suppress_errors: bool,
+    ) -> None:
+        if not hold.started or hold.stopped:
+            return
+        from pipecat.frames.frames import TTSStoppedFrame
+
+        try:
+            await self.push_frame(TTSStoppedFrame())
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if not suppress_errors:
+                raise
+            logger.warning(
+                "Could not balance interrupted held TTS output (%s)",
+                error.__class__.__name__,
+            )
+        else:
+            hold.stopped = True
 
     async def _release_decision_output_locked(
         self,
@@ -793,51 +980,171 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         """Release held PCM in order; caller serializes with new audio deltas."""
         if hold.released or hold.discarded:
             return
-        hold.released = True
-        task = hold.release_task
-        hold.release_task = None
+        task = hold.timeout_task
+        hold.timeout_task = None
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
+        authority = self._decision_output_release_authority
+        if authority is None:
+            raise RuntimeError("held response has no release authority")
+        self._require_decision_output_release_authority(hold, authority)
         frames = tuple(hold.audio_frames)
-        hold.audio_frames.clear()
         text_events = tuple(hold.text_events)
-        hold.text_events.clear()
-        for event_type, event in text_events:
-            if event_type == "text":
-                await super()._handle_evt_text_delta(event)
-            else:
-                await super()._handle_evt_audio_transcript_delta(event)
-        if not frames:
-            return
-        from pipecat.frames.frames import TTSStartedFrame, TTSStoppedFrame
+        release_complete = False
+        try:
+            for event_type, event in text_events:
+                self._require_decision_output_release_authority(hold, authority)
+                if hold.tool_disabled_mode == "follow_up_question":
+                    authorized = await self._follow_up_question_output_is_current(
+                        hold
+                    )
+                    self._require_decision_output_release_authority(
+                        hold,
+                        authority,
+                    )
+                    if not authorized:
+                        raise RuntimeError(
+                            "follow-up question lost its exact reservation owner"
+                        )
+                self._require_decision_output_release_authority(hold, authority)
+                if event_type == "text":
+                    await super()._handle_evt_text_delta(event)
+                else:
+                    await super()._handle_evt_audio_transcript_delta(event)
+                self._require_decision_output_release_authority(hold, authority)
+                hold.released = True
+            if not frames:
+                self._require_decision_output_release_authority(hold, authority)
+                hold.released = True
+                release_complete = True
+                return
+            from pipecat.frames.frames import TTSStartedFrame
 
-        if not hold.started:
-            await self.push_frame(TTSStartedFrame())
-            hold.started = True
-        context = (hold.response_id, hold.response_generation)
-        for frame in frames:
-            if not await self._deliver_assistant_audio_frame(frame, context):
-                raise RuntimeError(
-                    "held assistant audio lost its physical output owner"
-                )
-        if hold.audio_done:
-            await self.push_frame(TTSStoppedFrame())
+            self._require_decision_output_release_authority(hold, authority)
+            if hold.tool_disabled_mode == "follow_up_question":
+                authorized = await self._follow_up_question_output_is_current(hold)
+                self._require_decision_output_release_authority(hold, authority)
+                if not authorized:
+                    raise RuntimeError(
+                        "follow-up question lost its exact reservation owner"
+                    )
+            if not hold.started:
+                self._require_decision_output_release_authority(hold, authority)
+                hold.started = True
+                await self.push_frame(TTSStartedFrame())
+                self._require_decision_output_release_authority(hold, authority)
+            context = (hold.response_id, hold.response_generation)
+            for frame in frames:
+                self._require_decision_output_release_authority(hold, authority)
+                if hold.tool_disabled_mode == "follow_up_question":
+                    authorized = await self._follow_up_question_output_is_current(
+                        hold
+                    )
+                    self._require_decision_output_release_authority(
+                        hold,
+                        authority,
+                    )
+                    if not authorized:
+                        raise RuntimeError(
+                            "follow-up question lost its exact reservation owner"
+                        )
+                self._require_decision_output_release_authority(hold, authority)
+                if not await self._deliver_assistant_audio_frame(
+                    frame,
+                    context,
+                    hold=hold,
+                    release_authority=authority,
+                ):
+                    self._require_decision_output_release_authority(
+                        hold,
+                        authority,
+                    )
+                    raise RuntimeError(
+                        "held assistant audio lost its physical output owner"
+                    )
+                self._require_decision_output_release_authority(hold, authority)
+                hold.released = True
+            await self._balance_decision_output_tts(
+                hold,
+                suppress_errors=False,
+            )
+            self._require_decision_output_release_authority(hold, authority)
+            release_complete = True
+        finally:
+            if not release_complete and hold.started and not hold.stopped:
+                try:
+                    await asyncio.shield(
+                        self._balance_decision_output_tts(
+                            hold,
+                            suppress_errors=True,
+                        )
+                    )
+                except asyncio.CancelledError:
+                    raise
+            hold.audio_frames.clear()
+            hold.text_events.clear()
+
+    async def _follow_up_question_output_is_current(
+        self,
+        hold: _DecisionOutputHold,
+    ) -> bool:
+        authorizer = self._request_follow_up_question_output_authorized
+        if authorizer is None:
+            return False
+        try:
+            authorized = authorizer(
+                hold.response_id,
+                hold.response_generation,
+            )
+            if inspect.isawaitable(authorized):
+                authorized = await authorized
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        return authorized is True
+
+    def _discard_decision_output_locked(
+        self,
+        hold: _DecisionOutputHold,
+    ) -> bool:
+        """Discard one exact hold and return whether it contained generated PCM."""
+        if hold.discarded:
+            return False
+        self._revoke_decision_output_release_authority(hold)
+        task = hold.timeout_task
+        hold.timeout_task = None
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        generated_audio = bool(hold.audio_frames)
+        hold.audio_frames.clear()
+        hold.text_events.clear()
+        hold.discarded = True
+        self._current_audio_response = None
+        return generated_audio
 
     async def _expire_decision_output_hold(
         self,
         hold: _DecisionOutputHold,
     ) -> None:
         try:
-            await asyncio.sleep(self.DECISION_AUDIO_HOLD_TIMEOUT_S)
+            await asyncio.sleep(self.DECISION_OUTPUT_HOLD_TIMEOUT_S)
             async with self._decision_output_lock:
                 if self._decision_output_hold is hold:
-                    await self._release_decision_output_locked(hold)
+                    self._discard_decision_output_locked(hold)
+                    self._decision_output_hold = None
+                else:
+                    return
+            self.begin_recovery()
+            await self.push_error(
+                error_msg="decision output hold timed out and failed closed"
+            )
         except asyncio.CancelledError:
             return
         except Exception as error:
             self.begin_recovery()
             await self.push_error(
-                error_msg=f"decision output release failed closed: {error!r}"
+                error_msg=f"decision output timeout failed closed: {error!r}"
             )
 
     async def _finalize_decision_output(
@@ -846,102 +1153,398 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         response_generation: Optional[int],
         status: Optional[str],
         output: tuple[dict[str, Any], ...],
-    ) -> set[str]:
+        release_validation_error: Optional[str] = None,
+    ) -> tuple[
+        set[str],
+        Optional[_TerminalResponseNormalization],
+        Optional[str],
+    ]:
         """Resolve held output and publish one immutable terminal tool ledger."""
         if not response_id or response_generation is None:
-            return set()
+            return set(), None, None
         context = (response_id, response_generation)
+        tool_disabled_mode = self._tool_disabled_response_modes.get(context)
+        function_items = tuple(
+            item for item in output if item.get("type") == "function_call"
+        )
         output_call_ids = {
             str(item.get("call_id"))
-            for item in output
-            if item.get("type") == "function_call" and item.get("call_id")
+            for item in function_items
+            if item.get("call_id")
         }
         tracked_call_ids = set(self._response_tool_call_ids.get(context, set()))
         all_call_ids = tracked_call_ids | output_call_ids
-        exact_end_call_id = None
-        if (
-            status == "completed"
-            and len(output) == 1
-            and output[0].get("type") == "function_call"
-            and output[0].get("name") == END_CONVERSATION_TOOL_NAME
-            and output[0].get("call_id")
-        ):
-            exact_end_call_id = str(output[0]["call_id"])
-        exact_silent_candidate = (
-            exact_end_call_id is not None
-            and tracked_call_ids == {exact_end_call_id}
-            and END_CONVERSATION_TOOL_NAME in self._authorized_tool_names
-            and self._tool_call_details.get(exact_end_call_id)
-            == (END_CONVERSATION_TOOL_NAME, {})
-            and exact_end_call_id
-            in (self._scheduled_tool_call_ids | self._running_tool_call_ids)
-            and not (set(self._pending_function_calls) - {exact_end_call_id})
-            and not (
-                self._scheduled_tool_call_ids
-                - self._discarded_tool_result_ids
-                - {exact_end_call_id}
-            )
-            and not (self._running_tool_call_ids - {exact_end_call_id})
-            and self._silent_close_runtime_allowed is not None
-        )
-        if exact_silent_candidate:
-            try:
-                exact_silent_candidate = (
-                    self._silent_close_runtime_allowed() is True
+
+        def exact_current_control(
+            call_id: Optional[str],
+            function_name: str,
+            arguments: dict[str, Any],
+        ) -> bool:
+            return bool(
+                call_id
+                and tracked_call_ids == {call_id}
+                and function_name in self._authorized_tool_names
+                and self._tool_call_details.get(call_id)
+                == (function_name, arguments)
+                and call_id
+                in (self._scheduled_tool_call_ids | self._running_tool_call_ids)
+                and not (set(self._pending_function_calls) - {call_id})
+                and not (
+                    self._scheduled_tool_call_ids
+                    - self._discarded_tool_result_ids
+                    - {call_id}
                 )
-            except Exception:
-                exact_silent_candidate = False
+                and not (self._running_tool_call_ids - {call_id})
+            )
+
+        end_items = tuple(
+            item
+            for item in function_items
+            if item.get("name") == END_CONVERSATION_TOOL_NAME
+        )
+        tracked_end_call_ids = {
+            call_id
+            for call_id in tracked_call_ids
+            if self._tool_call_details.get(call_id, (None, None))[0]
+            == END_CONVERSATION_TOOL_NAME
+        }
+        contains_end_conversation = bool(end_items or tracked_end_call_ids)
+
+        request_items = tuple(
+            item
+            for item in function_items
+            if item.get("name") == REQUEST_FOLLOW_UP_TOOL_NAME
+        )
+        tracked_request_call_ids = {
+            call_id
+            for call_id in tracked_call_ids
+            if self._tool_call_details.get(call_id, (None, None))[0]
+            == REQUEST_FOLLOW_UP_TOOL_NAME
+        }
+        contains_request_follow_up = bool(request_items or tracked_request_call_ids)
+        assistant_items = tuple(
+            item
+            for item in output
+            if item.get("type") == "message" and item.get("role") == "assistant"
+        )
+        normalized_assistant_item_id: Optional[str] = None
+        control_shape_is_exact = (
+            status == "completed"
+            and len(function_items) == 1
+            and len(assistant_items) <= 1
+            and len(output) == len(function_items) + len(assistant_items)
+            and function_items[0].get("call_id")
+        )
+        if control_shape_is_exact and assistant_items:
+            assistant_item_id = assistant_items[0].get("id")
+            content = assistant_items[0].get("content")
+            control_shape_is_exact = bool(
+                isinstance(assistant_item_id, str)
+                and assistant_item_id
+                and isinstance(content, list)
+                and all(
+                    isinstance(part, dict)
+                    and part.get("type") in {"output_audio", "output_text"}
+                    for part in content
+                )
+            )
+            if control_shape_is_exact:
+                normalized_assistant_item_id = assistant_item_id
+        exact_request_call_id = (
+            str(request_items[0]["call_id"])
+            if control_shape_is_exact and len(request_items) == 1
+            else None
+        )
+        exact_end_call_id = (
+            str(end_items[0]["call_id"])
+            if control_shape_is_exact and len(end_items) == 1
+            else None
+        )
+        exact_request_candidate = exact_current_control(
+            exact_request_call_id,
+            REQUEST_FOLLOW_UP_TOOL_NAME,
+            {"purpose": REQUEST_FOLLOW_UP_PURPOSE},
+        )
+        exact_end_candidate = exact_current_control(
+            exact_end_call_id,
+            END_CONVERSATION_TOOL_NAME,
+            {},
+        )
 
         decision_output_held = False
         physical_audio_released = False
+        held_output_discarded = False
         generated_audio_discarded = False
+        confirmed_follow_up_answer = False
+        user_item_id = ""
+        recovery_reason = None
+        release_error = release_validation_error
         async with self._decision_output_lock:
             hold = self._decision_output_hold
             if hold is not None and self._decision_hold_matches(hold, context):
                 decision_output_held = True
-                if exact_silent_candidate and not hold.released:
-                    release_task = hold.release_task
-                    hold.release_task = None
-                    if (
-                        release_task is not None
-                        and release_task is not asyncio.current_task()
-                        and not release_task.done()
-                    ):
-                        release_task.cancel()
-                    generated_audio_discarded = bool(hold.audio_frames)
-                    hold.audio_frames.clear()
-                    hold.text_events.clear()
-                    hold.discarded = True
-                    self._current_audio_response = None
+                confirmed_follow_up_answer = hold.confirmed_follow_up_answer
+                user_item_id = hold.user_item_id
+                if (
+                    status != "completed"
+                    or contains_end_conversation
+                    or contains_request_follow_up
+                    or (tool_disabled_mode is not None and function_items)
+                    or release_error is not None
+                ):
+                    generated_audio_discarded = (
+                        self._discard_decision_output_locked(hold)
+                    )
+                    held_output_discarded = hold.discarded
                 else:
-                    await self._release_decision_output_locked(hold)
+                    if (
+                        (hold.audio_frames or hold.text_events)
+                        and not assistant_items
+                    ):
+                        release_error = (
+                            "held response output has no assistant message"
+                        )
+                        generated_audio_discarded = (
+                            self._discard_decision_output_locked(hold)
+                        )
+                        held_output_discarded = hold.discarded
+                    elif (
+                        hold.tool_disabled_mode == "follow_up_question"
+                        and not await self._follow_up_question_output_is_current(
+                            hold
+                        )
+                    ):
+                        release_error = (
+                            "follow-up question lost its exact reservation owner"
+                        )
+                        generated_audio_discarded = (
+                            self._discard_decision_output_locked(hold)
+                        )
+                        held_output_discarded = hold.discarded
+                    else:
+                        try:
+                            await self._release_decision_output_locked(hold)
+                        except Exception as error:
+                            release_error = (
+                                "held response output could not be released: "
+                                f"{error!r}"
+                            )
+                            if not hold.released:
+                                generated_audio_discarded = (
+                                    self._discard_decision_output_locked(hold)
+                                )
+                                held_output_discarded = hold.discarded
                 physical_audio_released = hold.released
-                self._decision_output_hold = None
+                if self._decision_output_hold is hold:
+                    self._revoke_decision_output_release_authority(hold)
+                    self._decision_output_hold = None
+
+        isolated_control = (
+            decision_output_held
+            and held_output_discarded
+            and not physical_audio_released
+        )
+        fatal_request_shape = contains_request_follow_up and not (
+            exact_request_candidate
+            and isolated_control
+        )
+        fatal_end_shape = contains_end_conversation and not (
+            exact_end_candidate and isolated_control
+        )
+        if decision_output_held and status != "completed":
+            recovery_reason = (
+                f"response ended with non-completed status {status!r}; "
+                "held output was discarded"
+            )
+        elif tool_disabled_mode is not None and function_items:
+            recovery_reason = (
+                f"tool-disabled {tool_disabled_mode} response emitted a "
+                "function call"
+            )
+        elif tool_disabled_mode is not None and (
+            not decision_output_held
+            or not isinstance(hold, _DecisionOutputHold)
+            or hold.tool_disabled_mode != tool_disabled_mode
+        ):
+            recovery_reason = (
+                f"tool-disabled {tool_disabled_mode} response lost its output hold"
+            )
+        elif release_error is not None:
+            recovery_reason = release_error
+        elif fatal_request_shape:
+            recovery_reason = (
+                "request_follow_up appeared in a non-normalizable response"
+            )
+        elif fatal_end_shape:
+            recovery_reason = (
+                "end_conversation appeared in a non-normalizable response"
+            )
+        if recovery_reason is not None:
+            self._discarded_tool_result_ids.update(all_call_ids)
+
+        effective_output = output
+        normalization_complete = True
+        normalized_call_id = None
+        normalized_function_name = None
+        if exact_request_candidate:
+            effective_output = (request_items[0],)
+            normalized_call_id = exact_request_call_id
+            normalized_function_name = REQUEST_FOLLOW_UP_TOOL_NAME
+            normalization_complete = normalized_assistant_item_id is None
+        elif exact_end_candidate:
+            effective_output = (end_items[0],)
+            normalized_call_id = exact_end_call_id
+            normalized_function_name = END_CONVERSATION_TOOL_NAME
+            normalization_complete = normalized_assistant_item_id is None
 
         ledger = _TerminalResponseLedger(
             response_id=response_id,
             response_generation=response_generation,
             status=status,
-            output=output,
+            raw_output=output,
+            output=effective_output,
+            user_item_id=user_item_id,
             decision_output_held=decision_output_held,
             physical_audio_released=physical_audio_released,
+            held_output_discarded=held_output_discarded,
             generated_audio_discarded=generated_audio_discarded,
+            confirmed_follow_up_answer=confirmed_follow_up_answer,
+            normalization_complete=normalization_complete,
+            normalized_assistant_item_id=normalized_assistant_item_id,
         )
-        waiting_call_ids = all_call_ids & set(self._terminal_response_events)
-        for call_id in waiting_call_ids:
+        ledger_call_ids = (
+            all_call_ids & set(self._terminal_response_events)
+        ) | {
+            call_id
+            for call_id in all_call_ids
+            if self._tool_call_details.get(call_id, (None, None))[0]
+            in CONVERSATION_CONTROL_TOOL_NAMES
+        }
+        for call_id in ledger_call_ids:
             self._terminal_response_ledgers[call_id] = ledger
-        if not waiting_call_ids:
+        if not ledger_call_ids:
             self._response_tool_call_ids.pop(context, None)
-        return waiting_call_ids
+        normalization = (
+            _TerminalResponseNormalization(
+                tool_call_id=normalized_call_id,
+                function_name=normalized_function_name,
+                assistant_item_id=normalized_assistant_item_id,
+                ledger=ledger,
+            )
+            if (
+                normalized_call_id is not None
+                and normalized_function_name is not None
+                and normalized_assistant_item_id is not None
+            )
+            else None
+        )
+        immediate_call_ids = (
+            ledger_call_ids - {normalized_call_id}
+            if normalization is not None
+            else ledger_call_ids
+        )
+        return immediate_call_ids, normalization, recovery_reason
 
     def _signal_terminal_response(self, call_ids: set[str]) -> None:
         for call_id in call_ids:
-            event = self._terminal_response_events.get(call_id)
-            if event is not None and call_id in self._terminal_response_ledgers:
-                event.set()
+            if call_id in self._terminal_response_ledgers:
+                self._terminal_response_events.setdefault(
+                    call_id,
+                    asyncio.Event(),
+                ).set()
+
+    async def _normalize_mixed_control_response(
+        self,
+        normalization: _TerminalResponseNormalization,
+    ) -> None:
+        """Delete one unheard assistant item before authorizing its control."""
+        from pipecat.services.openai.realtime import events
+
+        tool_call_id = normalization.tool_call_id
+        assistant_item_id = normalization.assistant_item_id
+        ledger = normalization.ledger
+        context = (ledger.response_id, ledger.response_generation)
+        try:
+            if (
+                self._recovery_active
+                or self._tool_call_response_contexts.get(tool_call_id) != context
+                or self._terminal_response_ledgers.get(tool_call_id) is not ledger
+                or self._tool_call_generations.get(tool_call_id)
+                != self._session_generation
+            ):
+                raise RuntimeError("mixed control normalization lost its owner")
+            await self._wait_for_in_progress_tool_placeholder(tool_call_id)
+            await self.send_client_event(
+                events.ConversationItemDeleteEvent(item_id=assistant_item_id)
+            )
+            await self._confirm_item_deleted(assistant_item_id)
+            async with self._history_lock:
+                if (
+                    self._recovery_active
+                    or self._tool_call_response_contexts.get(tool_call_id) != context
+                    or self._terminal_response_ledgers.get(tool_call_id) is not ledger
+                    or not self._conversation_window.discard_active_assistant_item(
+                        ledger.user_item_id,
+                        assistant_item_id,
+                    )
+                ):
+                    raise RuntimeError(
+                        "mixed control local context could not be normalized"
+                    )
+                self._sync_local_context(
+                    include_active_user=True,
+                    preserve_in_progress_call_ids={tool_call_id},
+                )
+                self._terminal_response_ledgers[tool_call_id] = replace(
+                    ledger,
+                    normalization_complete=True,
+                )
+            self._signal_terminal_response({tool_call_id})
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._discarded_tool_result_ids.add(tool_call_id)
+            self.begin_recovery()
+            await self.push_error(
+                error_msg=(
+                    f"mixed {normalization.function_name} output failed closed during "
+                    f"normalization: {error!r}"
+                )
+            )
+
+    async def _terminal_response_ledger_for(
+        self,
+        tool_call_id: str,
+    ) -> Optional[_TerminalResponseLedger]:
+        if self._recovery_active:
+            return None
+        event = self._terminal_response_events.setdefault(
+            tool_call_id,
+            asyncio.Event(),
+        )
+        if self._recovery_active:
+            return None
+        try:
+            await asyncio.wait_for(
+                event.wait(),
+                timeout=self.RESPONSE_FINISHED_TIMEOUT_S,
+            )
+        except TimeoutError:
+            ledger = self._terminal_response_ledgers.get(tool_call_id)
+            if event.is_set() and ledger is not None and not self._recovery_active:
+                return ledger
+            self._discarded_tool_result_ids.add(tool_call_id)
+            self.begin_recovery()
+            await self.push_error(
+                error_msg="terminal response ledger timed out and failed closed"
+            )
+            return None
+        if self._recovery_active:
+            return None
+        return self._terminal_response_ledgers.get(tool_call_id)
 
     async def end_conversation_is_sole_terminal_tool(self, tool_call_id: str) -> bool:
-        """Authorize silent close only after the exact response terminal ledger."""
+        """Authorize exact terminal end control after structural output isolation."""
         context = self._tool_call_response_contexts.get(tool_call_id)
         if (
             context is None
@@ -951,18 +1554,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             or END_CONVERSATION_TOOL_NAME not in self._authorized_tool_names
         ):
             return False
-        event = self._terminal_response_events.setdefault(
-            tool_call_id,
-            asyncio.Event(),
-        )
-        try:
-            await asyncio.wait_for(
-                event.wait(),
-                timeout=self.RESPONSE_FINISHED_TIMEOUT_S,
-            )
-        except TimeoutError:
-            return False
-        ledger = self._terminal_response_ledgers.get(tool_call_id)
+        ledger = await self._terminal_response_ledger_for(tool_call_id)
         if ledger is None or context != (
             ledger.response_id,
             ledger.response_generation,
@@ -972,9 +1564,54 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             ledger.status == "completed"
             and ledger.decision_output_held
             and not ledger.physical_audio_released
+            and ledger.held_output_discarded
+            and ledger.confirmed_follow_up_answer
+            and ledger.normalization_complete
             and len(ledger.output) == 1
             and ledger.output[0].get("type") == "function_call"
             and ledger.output[0].get("name") == END_CONVERSATION_TOOL_NAME
+            and ledger.output[0].get("call_id") == tool_call_id
+            and self._response_tool_call_ids.get(context) == {tool_call_id}
+            and not (set(self._pending_function_calls) - {tool_call_id})
+            and not (
+                self._scheduled_tool_call_ids - self._discarded_tool_result_ids
+            )
+            and self._running_tool_call_ids == {tool_call_id}
+            and TURN_LIVENESS.in_flight == 1
+        )
+
+    async def request_follow_up_is_sole_terminal_tool(
+        self,
+        tool_call_id: str,
+    ) -> bool:
+        """Authorize follow-up only after exact terminal output isolation."""
+        context = self._tool_call_response_contexts.get(tool_call_id)
+        if (
+            context is None
+            or not self.request_follow_up_is_sole_tool(tool_call_id)
+            or self._tool_call_details.get(tool_call_id)
+            != (
+                REQUEST_FOLLOW_UP_TOOL_NAME,
+                {"purpose": REQUEST_FOLLOW_UP_PURPOSE},
+            )
+            or REQUEST_FOLLOW_UP_TOOL_NAME not in self._authorized_tool_names
+        ):
+            return False
+        ledger = await self._terminal_response_ledger_for(tool_call_id)
+        if ledger is None or context != (
+            ledger.response_id,
+            ledger.response_generation,
+        ):
+            return False
+        return (
+            ledger.status == "completed"
+            and ledger.decision_output_held
+            and not ledger.physical_audio_released
+            and ledger.held_output_discarded
+            and ledger.normalization_complete
+            and len(ledger.output) == 1
+            and ledger.output[0].get("type") == "function_call"
+            and ledger.output[0].get("name") == REQUEST_FOLLOW_UP_TOOL_NAME
             and ledger.output[0].get("call_id") == tool_call_id
             and self._response_tool_call_ids.get(context) == {tool_call_id}
             and not (set(self._pending_function_calls) - {tool_call_id})
@@ -994,7 +1631,6 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         from pipecat.frames.frames import TTSAudioRawFrame, TTSStartedFrame
         from pipecat.services.openai.realtime.llm import CurrentAudioResponse
 
-        await self.stop_ttfb_metrics()
         new_audio_response = not self._current_audio_response
         if new_audio_response:
             self._current_audio_response = CurrentAudioResponse(
@@ -1009,6 +1645,8 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             sample_rate=24000,
             num_channels=1,
         )
+        held = False
+        hold_failed = False
         async with self._decision_output_lock:
             hold = self._decision_output_hold
             if (
@@ -1020,21 +1658,28 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             ):
                 hold.audio_frames.append(frame)
                 hold.audio_bytes += len(audio)
-                if hold.release_task is None:
-                    hold.release_task = self._track_turn_task(
-                        self._expire_decision_output_hold(hold)
-                    )
+                held = True
+                TURN_LIVENESS.model_activity()
                 if (
                     hold.audio_bytes + hold.text_bytes
-                    >= self.DECISION_AUDIO_HOLD_MAX_BYTES
+                    > self.DECISION_OUTPUT_HOLD_MAX_BYTES
                     or len(hold.audio_frames) + len(hold.text_events)
-                    >= self.DECISION_OUTPUT_HOLD_MAX_EVENTS
+                    > self.DECISION_OUTPUT_HOLD_MAX_EVENTS
                 ):
-                    await self._release_decision_output_locked(hold)
-                return
-            if new_audio_response:
-                await self.push_frame(TTSStartedFrame())
-            await self._deliver_assistant_audio_frame(frame, context)
+                    self._discard_decision_output_locked(hold)
+                    self._decision_output_hold = None
+                    hold_failed = True
+        if hold_failed:
+            self.begin_recovery()
+            await self.push_error(
+                error_msg="decision output hold exceeded its bound and failed closed"
+            )
+            return
+        if held:
+            return
+        if new_audio_response:
+            await self.push_frame(TTSStartedFrame())
+        await self._deliver_assistant_audio_frame(frame, context)
 
     async def _handle_evt_audio_done(self, evt):  # type: ignore[override]
         context = self._active_output_response_context
@@ -1055,6 +1700,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
 
     async def _hold_decision_text_event(self, event_type: str, evt: Any) -> bool:
         context = self._active_output_response_context
+        hold_failed = False
         async with self._decision_output_lock:
             hold = self._decision_output_hold
             if (
@@ -1067,18 +1713,22 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                 return False
             hold.text_events.append((event_type, evt))
             hold.text_bytes += len(str(getattr(evt, "delta", "")).encode("utf-8"))
-            if hold.release_task is None:
-                hold.release_task = self._track_turn_task(
-                    self._expire_decision_output_hold(hold)
-                )
+            TURN_LIVENESS.model_activity()
             if (
                 hold.audio_bytes + hold.text_bytes
-                >= self.DECISION_AUDIO_HOLD_MAX_BYTES
+                > self.DECISION_OUTPUT_HOLD_MAX_BYTES
                 or len(hold.audio_frames) + len(hold.text_events)
-                >= self.DECISION_OUTPUT_HOLD_MAX_EVENTS
+                > self.DECISION_OUTPUT_HOLD_MAX_EVENTS
             ):
-                await self._release_decision_output_locked(hold)
-            return True
+                self._discard_decision_output_locked(hold)
+                self._decision_output_hold = None
+                hold_failed = True
+        if hold_failed:
+            self.begin_recovery()
+            await self.push_error(
+                error_msg="decision output hold exceeded its bound and failed closed"
+            )
+        return True
 
     async def _handle_evt_text_delta(self, evt):  # type: ignore[override]
         context = self._active_output_response_context
@@ -1116,6 +1766,9 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._turn_tasks.difference_update(tasks)
+        self._terminal_tasks.difference_update(tasks)
+        if not self._terminal_tasks:
+            self._terminal_tasks_drained.set()
         continuation = self._continuation_task
         if continuation is not None and continuation is not current:
             continuation.cancel()
@@ -1130,6 +1783,23 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
     def begin_recovery(self) -> None:
         """Suppress responses before old tools and processor queues are drained."""
         self._recovery_active = True
+        self._decision_output_release_generation += 1
+        self._decision_output_release_authority = None
+        if self._assistant_output_revoked is not None:
+            try:
+                result = self._assistant_output_revoked()
+                if inspect.isawaitable(result):
+                    close = getattr(result, "close", None)
+                    if close is not None:
+                        close()
+                    raise RuntimeError(
+                        "assistant output recovery revocation must be synchronous"
+                    )
+            except Exception as error:
+                logger.error(
+                    "Assistant output recovery revocation failed (%s)",
+                    error.__class__.__name__,
+                )
         self._active_output_response_context = None
         self._run_llm_when_api_session_ready = False
         self._llm_needs_conversation_setup = False
@@ -1141,26 +1811,35 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                 set(self._continuation_result_call_ids)
             )
         self._continuation_result_call_ids.clear()
+        self._tool_disabled_continuation_call_ids.clear()
+        self._pending_tool_disabled_response_mode = None
+        self._tool_disabled_response_modes.clear()
+        self._ttfb_delivered_output_contexts.clear()
         self._tool_call_output_contexts.clear()
         self._follow_up_answer_item_sequences.clear()
         self._confirmed_follow_up_answer_identity = None
         hold = self._decision_output_hold
         self._decision_output_hold = None
         if hold is not None:
-            hold.discarded = True
-            hold.audio_frames.clear()
-            hold.text_events.clear()
-            if hold.release_task is not None and not hold.release_task.done():
-                hold.release_task.cancel()
+            self._discard_decision_output_locked(hold)
         self._tool_call_response_contexts.clear()
         self._response_tool_call_ids.clear()
         self._terminal_response_ledgers.clear()
         for terminal_event in self._terminal_response_events.values():
             terminal_event.set()
         self._terminal_response_events.clear()
+        self._response_finished.set()
+        self._turn_terminal.set()
         for output_event in self._silent_tool_output_events.values():
             output_event.set()
         current = asyncio.current_task()
+        terminal_tasks = [
+            task
+            for task in self._terminal_tasks
+            if task is not current and not task.done()
+        ]
+        for task in terminal_tasks:
+            task.cancel()
         for task in list(self._turn_tasks):
             if task is not current and not task.done():
                 task.cancel()
@@ -1239,13 +1918,82 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             return
         await super().send_client_event(event)
 
-    def _sync_local_context(self, *, include_active_user: bool = False) -> None:
-        if self._context is not None and hasattr(self._context, "set_messages"):
-            self._context.set_messages(
-                self._conversation_window.context_messages(
-                    include_active_user=include_active_user
-                )
+    def _sync_local_context(
+        self,
+        *,
+        include_active_user: bool = False,
+        preserve_in_progress_call_ids: AbstractSet[str] = frozenset(),
+    ) -> None:
+        if self._context is None or not hasattr(self._context, "set_messages"):
+            return
+        messages = self._conversation_window.context_messages(
+            include_active_user=include_active_user
+        )
+        pending_ids = set(preserve_in_progress_call_ids)
+        if pending_ids:
+            owned_ids = (
+                self._scheduled_tool_call_ids
+                | self._running_tool_call_ids
+                | self._pending_tool_result_ids
             )
+            if not pending_ids <= owned_ids:
+                raise RuntimeError("in-progress tool placeholder lost its owner")
+            rebuilt = []
+            inserted = set()
+            for message in messages:
+                rebuilt.append(message)
+                if message.get("role") != "assistant":
+                    continue
+                tool_calls = message.get("tool_calls")
+                if not isinstance(tool_calls, list) or len(tool_calls) != 1:
+                    continue
+                call_id = tool_calls[0].get("id")
+                if call_id not in pending_ids:
+                    continue
+                if call_id in inserted:
+                    raise RuntimeError("duplicate in-progress tool call projection")
+                rebuilt.append(
+                    {
+                        "role": "tool",
+                        "content": "IN_PROGRESS",
+                        "tool_call_id": call_id,
+                    }
+                )
+                inserted.add(call_id)
+            if inserted != pending_ids:
+                raise RuntimeError("in-progress tool call projection is incomplete")
+            messages = rebuilt
+        self._context.set_messages(messages)
+
+    async def _wait_for_in_progress_tool_placeholder(self, call_id: str) -> None:
+        """Wait boundedly for Pipecat to establish the exact result placeholder."""
+        if self._assistant_context_aggregator is None:
+            if call_id not in (
+                self._scheduled_tool_call_ids | self._running_tool_call_ids
+            ):
+                raise RuntimeError("control tool did not start before normalization")
+            return
+        deadline = time.monotonic() + self.CONVERSATION_ITEM_TIMEOUT_S
+        while not self._recovery_active:
+            calls = getattr(
+                self._assistant_context_aggregator,
+                "_function_calls_in_progress",
+                {},
+            )
+            placeholders = [
+                message
+                for message in self._context.get_messages()
+                if isinstance(message, dict)
+                and message.get("role") == "tool"
+                and message.get("tool_call_id") == call_id
+                and message.get("content") == "IN_PROGRESS"
+            ]
+            if calls.get(call_id) is not None and len(placeholders) == 1:
+                return
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.01)
+        raise RuntimeError("Pipecat in-progress tool placeholder did not settle")
 
     def _continuation_pending(self) -> bool:
         return (
@@ -1494,6 +2242,44 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                         error_msg=f"context compaction failed: {error!r}"
                     )
 
+    async def _reject_tool_disabled_function_call(
+        self,
+        item: dict[str, Any],
+        context: tuple[str, int],
+        mode: str,
+    ) -> None:
+        """Quarantine a server tool violation before Pipecat can dispatch it."""
+        from pipecat.services.openai.realtime import events
+
+        call_id = str(item.get("call_id") or "")
+        item_id = item.get("id")
+        if call_id:
+            self._pending_function_calls.pop(call_id, None)
+            self._discarded_tool_result_ids.add(call_id)
+            self._interrupted_tool_result_ids.add(call_id)
+            self._retired_aggregator_call_ids.add(call_id)
+            self._completed_tool_calls.add(call_id)
+        if item_id:
+            self._interrupted_item_ids.add(str(item_id))
+        if self._request_follow_up_response_failed is not None:
+            self._request_follow_up_response_failed(context[0])
+        await self.mark_interrupted_response()
+        self._response_interrupt_generations[
+            context[0]
+        ] = self._interrupted_response_generation
+        cancel_event = events.ResponseCancelEvent()
+        self.note_interrupt_cancel_event(cancel_event.event_id)
+        self.begin_recovery()
+        try:
+            await self.send_client_event(cancel_event)
+        finally:
+            await self.push_error(
+                error_msg=(
+                    f"tool-disabled {mode} response emitted a function call; "
+                    "the response was quarantined before dispatch"
+                )
+            )
+
     async def _handle_evt_conversation_item_added(self, evt):  # type: ignore[override]
         event_generation = _CURRENT_REALTIME_SESSION_GENERATION.get()
         if event_generation not in (None, self._session_generation):
@@ -1516,6 +2302,15 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             ):
                 self._discarded_user_item_ids.add(str(item_id))
             logger.info("🔇 old-session conversation item suppressed during recovery")
+            return
+        output_context = self._active_output_response_context
+        tool_disabled_mode = self._tool_disabled_response_modes.get(output_context)
+        if item.get("type") == "function_call" and tool_disabled_mode is not None:
+            await self._reject_tool_disabled_function_call(
+                item,
+                output_context,
+                tool_disabled_mode,
+            )
             return
         manually_added = item_id in self._messages_added_manually
         if (
@@ -1830,6 +2625,13 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         await super()._handle_evt_speech_stopped(evt)
 
     async def _handle_evt_function_call_arguments_done(self, evt):  # type: ignore[override]
+        if evt.call_id in self._discarded_tool_result_ids:
+            self._pending_function_calls.pop(evt.call_id, None)
+            logger.info(
+                "🔇 quarantined tool-disabled function call suppressed: %s",
+                evt.call_id,
+            )
+            return
         if (
             self._interrupted_response_active
             or self._post_interrupt_response_quarantine
@@ -2310,15 +3112,40 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                                     continuation_call_ids
                                 )
                             )
+                        spoken_close_response = bool(
+                            len(continuation_call_ids) == 1
+                            and continuation_call_ids
+                            <= self._tool_disabled_continuation_call_ids
+                        )
+                        response_mode = (
+                            "follow_up_question"
+                            if follow_up_armed
+                            else (
+                                "spoken_close_response"
+                                if spoken_close_response
+                                else None
+                            )
+                        )
+                        if self._pending_tool_disabled_response_mode is not None:
+                            raise RuntimeError(
+                                "a prior tool-disabled response intent is unresolved"
+                            )
+                        self._pending_tool_disabled_response_mode = response_mode
                         try:
                             await self.send_client_event(
                                 events.ResponseCreateEvent(
                                     response=events.ResponseProperties(
-                                        output_modalities=self._get_enabled_modalities()
+                                        output_modalities=self._get_enabled_modalities(),
+                                        tools=[] if response_mode is not None else None,
+                                        tool_choice=(
+                                            "none" if response_mode is not None else None
+                                        ),
                                     )
                                 )
                             )
                         except BaseException:
+                            if self._pending_tool_disabled_response_mode == response_mode:
+                                self._pending_tool_disabled_response_mode = None
                             if (
                                 follow_up_armed
                                 and self._request_follow_up_continuation_failed
@@ -2329,6 +3156,9 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                                 )
                             raise
                         self._continuation_result_call_ids.difference_update(
+                            continuation_call_ids
+                        )
+                        self._tool_disabled_continuation_call_ids.difference_update(
                             continuation_call_ids
                         )
                         for call_id in continuation_call_ids:
@@ -2507,12 +3337,30 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         )
         completed_output_context = None
         terminal_call_ids: set[str] = set()
+        control_normalization = None
+        finalization_error = None
+        response_release_error = None
+        turn_ended = False
+        unreplayable_terminal = False
+        response_turn_id = None
+        completed_tool_disabled_mode = None
         if (
             self._active_output_response_context is not None
             and self._active_output_response_context[0] == response_id
         ):
             completed_output_context = self._active_output_response_context
             self._active_output_response_context = None
+            completed_tool_disabled_mode = self._tool_disabled_response_modes.get(
+                completed_output_context
+            )
+        held_response_requires_validation = bool(
+            completed_output_context is not None
+            and self._decision_output_hold is not None
+            and self._decision_hold_matches(
+                self._decision_output_hold,
+                completed_output_context,
+            )
+        )
         if self._recovery_active:
             self._response_interrupt_generations.pop(response_id, None)
             if response_id == self._active_response_id:
@@ -2521,7 +3369,6 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             self._managed_response_sent = False
             logger.info("🔇 old-session response completion suppressed during recovery")
             return
-        unreplayable_terminal = False
         response_was_active = (
             response_id is None
             or response_id == self._active_response_id
@@ -2533,16 +3380,56 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         if response_id is None and self._interrupted_response_active:
             interrupt_generation = self._interrupted_response_generation
         interrupted_response = interrupt_generation is not None
+        continuation_pending = self._continuation_pending()
+        continuable_call_ids = (
+            self._running_tool_call_ids
+            | self._scheduled_tool_call_ids
+            | self._pending_tool_result_ids
+            | self._continuation_result_call_ids
+        )
+        if (
+            self._managed_context
+            and response_was_active
+            and not interrupted_response
+        ):
+            async with self._history_lock:
+                response_turn_id = self._conversation_window.active_turn_id
+                turn_ended = self._conversation_window.finish_response(
+                    evt.response.status,
+                    list(response_output),
+                    continuation_pending=continuation_pending,
+                    continuable_call_ids=continuable_call_ids,
+                )
+                if turn_ended and self._conversation_window.turns:
+                    unreplayable_terminal = not (
+                        self._conversation_window.turns[-1].replayable
+                    )
+                if held_response_requires_validation:
+                    response_release_error = (
+                        self._conversation_window.response_release_error(
+                            response_turn_id or "",
+                            evt.response.status,
+                            list(response_output),
+                            turn_ended=turn_ended,
+                            continuation_pending=continuation_pending,
+                            continuable_call_ids=continuable_call_ids,
+                        )
+                    )
         if (
             completed_output_context is not None
             and response_was_active
             and not interrupted_response
         ):
-            terminal_call_ids = await self._finalize_decision_output(
+            (
+                terminal_call_ids,
+                control_normalization,
+                finalization_error,
+            ) = await self._finalize_decision_output(
                 response_id,
                 completed_output_context[1],
                 getattr(evt.response, "status", None),
                 response_output,
+                response_release_error,
             )
         elif completed_output_context is not None:
             async with self._decision_output_lock:
@@ -2554,17 +3441,50 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                         completed_output_context,
                     )
                 ):
-                    hold.discarded = True
-                    hold.audio_frames.clear()
-                    hold.text_events.clear()
-                    if hold.release_task is not None and not hold.release_task.done():
-                        hold.release_task.cancel()
+                    self._discard_decision_output_locked(hold)
                     self._decision_output_hold = None
-                    self._current_audio_response = None
+                    if getattr(evt.response, "status", None) != "completed":
+                        finalization_error = (
+                            "inactive response ended with non-completed status "
+                            f"{getattr(evt.response, 'status', None)!r}; held "
+                            "output was discarded"
+                        )
+        if completed_output_context is not None:
+            self._tool_disabled_response_modes.pop(
+                completed_output_context,
+                None,
+            )
+            self._ttfb_delivered_output_contexts.discard(
+                completed_output_context
+            )
+        if finalization_error is not None:
+            self.begin_recovery()
+            if (
+                completed_tool_disabled_mode == "follow_up_question"
+                and self._request_follow_up_response_failed is not None
+            ):
+                self._request_follow_up_response_failed(response_id)
+            if response_turn_id is not None:
+                try:
+                    async with self._history_lock:
+                        if self._conversation_window.discard_response_output(
+                            response_turn_id,
+                            list(response_output),
+                        ):
+                            self._sync_local_context(include_active_user=True)
+                except Exception as rollback_error:
+                    finalization_error = (
+                        f"{finalization_error}; local response rollback failed: "
+                        f"{rollback_error!r}"
+                    )
+            await self.push_error(
+                error_msg=f"response output failed closed: {finalization_error}"
+            )
         if (
             completed_output_context is not None
             and response_was_active
             and not interrupted_response
+            and not self._recovery_active
         ):
             for item in response_output:
                 call_id = item.get("call_id")
@@ -2597,26 +3517,6 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
 
             await self.push_frame(LLMFullResponseStartFrame())
         async with self._history_lock:
-            turn_ended = (
-                self._conversation_window.finish_response(
-                    evt.response.status,
-                    list(response_output),
-                    continuation_pending=self._continuation_pending(),
-                    continuable_call_ids=(
-                        self._running_tool_call_ids
-                        | self._scheduled_tool_call_ids
-                        | self._pending_tool_result_ids
-                    ),
-                )
-                if (
-                    self._managed_context
-                    and response_was_active
-                    and not interrupted_response
-                )
-                else False
-            )
-            if turn_ended and self._conversation_window.turns:
-                unreplayable_terminal = not self._conversation_window.turns[-1].replayable
             try:
                 u = evt.response.usage
                 itd = getattr(u, "input_token_details", None)
@@ -2676,11 +3576,12 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                 for item in response_output
                 if (item_id := item.get("id"))
             )
-        if unreplayable_terminal:
+        if unreplayable_terminal and not self._recovery_active:
             self.begin_recovery()
             await self.push_error(
                 error_msg=(
-                    "context compaction failed: terminal turn was not safely replayable"
+                    "context compaction failed: terminal turn was not safely "
+                    "replayable"
                 )
             )
         if response_was_active and not interrupted_response and not (
@@ -2694,6 +3595,12 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             )
         ):
             self._unmanaged_active_item_ids.clear()
+        if control_normalization is not None and not self._recovery_active:
+            self._track_terminal_task(
+                self._normalize_mixed_control_response(
+                    control_normalization,
+                )
+            )
         self._signal_terminal_response(terminal_call_ids)
 
     async def _replay_history(
@@ -3139,8 +4046,23 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                         properties = SilentCloseResultProperties(
                             on_context_updated=finalize_silent_context,
                         )
+                    elif isinstance(
+                        properties,
+                        SpokenCloseVetoResultProperties,
+                    ):
+                        if function_name != END_CONVERSATION_TOOL_NAME:
+                            raise RuntimeError(
+                                "tool-disabled close reply is reserved for "
+                                "end_conversation"
+                            )
+                        self._tool_disabled_continuation_call_ids.add(
+                            params.tool_call_id
+                        )
                     await original_result_callback(result, properties=properties)
                 except BaseException as error:
+                    self._tool_disabled_continuation_call_ids.discard(
+                        params.tool_call_id
+                    )
                     self._pending_tool_result_ids.discard(params.tool_call_id)
                     if not self._pending_tool_result_ids:
                         self._pending_tool_results_drained.set()
@@ -3432,6 +4354,19 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                         else None
                     )
                     self._active_output_response_context = output_context
+                    response_mode = self._pending_tool_disabled_response_mode
+                    self._pending_tool_disabled_response_mode = None
+                    if response_mode is not None and output_context is None:
+                        if self._request_follow_up_response_failed is not None:
+                            self._request_follow_up_response_failed(response_id)
+                        self.begin_recovery()
+                        await self.push_error(
+                            error_msg=(
+                                "tool-disabled continuation had no response "
+                                "identity and failed closed"
+                            )
+                        )
+                        return
                     quarantine_response = (
                         self._recovery_active
                         or self._interrupt_cancel_pending
@@ -3450,6 +4385,15 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                         await self.send_client_event(cancel_event)
                     elif response_id:
                         self._response_interrupt_generations[response_id] = None
+                        follow_up_response_bound = False
+                        if self._request_follow_up_response_created is not None:
+                            follow_up_response_bound = (
+                                self._request_follow_up_response_created(
+                                    response_id,
+                                    self._output_response_generation,
+                                )
+                                is True
+                            )
                         if (
                             output_context is not None
                             and self._assistant_output_response_created is not None
@@ -3462,13 +4406,90 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                             if result is False:
                                 self._active_output_response_context = None
                                 self._confirmed_follow_up_answer_identity = None
+                        spoken_close_response_allowed = False
                         if (
+                            response_mode == "spoken_close_response"
+                            and self._silent_close_spoken_response_allowed is not None
+                        ):
+                            try:
+                                spoken_close_response_allowed = (
+                                    self._silent_close_spoken_response_allowed()
+                                    is True
+                                )
+                            except Exception:
+                                spoken_close_response_allowed = False
+                        stream_tool_disabled_response = (
+                            (
+                                response_mode == "follow_up_question"
+                                and follow_up_response_bound
+                            )
+                            or (
+                                response_mode == "spoken_close_response"
+                                and spoken_close_response_allowed
+                            )
+                        )
+                        output_response_owned = (
                             output_context is not None
                             and self._active_output_response_context == output_context
+                        )
+                        if response_mode is not None and not (
+                            stream_tool_disabled_response and output_response_owned
                         ):
-                            self._begin_decision_output_hold(*output_context)
-                        if self._request_follow_up_response_created is not None:
-                            self._request_follow_up_response_created(response_id)
+                            if self._request_follow_up_response_failed is not None:
+                                self._request_follow_up_response_failed(response_id)
+                            await self.mark_interrupted_response()
+                            if response_id:
+                                self._response_interrupt_generations[
+                                    response_id
+                                ] = self._interrupted_response_generation
+                            cancel_event = events.ResponseCancelEvent()
+                            self.note_interrupt_cancel_event(cancel_event.event_id)
+                            self.begin_recovery()
+                            await self.send_client_event(cancel_event)
+                            await self.push_error(
+                                error_msg=(
+                                    "tool-disabled continuation lost its exact "
+                                    "response owner and failed closed"
+                                )
+                            )
+                            return
+                        if (
+                            output_response_owned
+                        ):
+                            if stream_tool_disabled_response:
+                                self._tool_disabled_response_modes[
+                                    output_context
+                                ] = response_mode
+                                self._confirmed_follow_up_answer_identity = None
+                                if not self._begin_decision_output_hold(
+                                    *output_context,
+                                    tool_disabled_mode=response_mode,
+                                ):
+                                    self._tool_disabled_response_modes.pop(
+                                        output_context,
+                                        None,
+                                    )
+                                    if self._request_follow_up_response_failed is not None:
+                                        self._request_follow_up_response_failed(response_id)
+                                    await self.mark_interrupted_response()
+                                    self._response_interrupt_generations[
+                                        response_id
+                                    ] = self._interrupted_response_generation
+                                    cancel_event = events.ResponseCancelEvent()
+                                    self.note_interrupt_cancel_event(
+                                        cancel_event.event_id
+                                    )
+                                    self.begin_recovery()
+                                    await self.send_client_event(cancel_event)
+                                    await self.push_error(
+                                        error_msg=(
+                                            "tool-disabled continuation could not "
+                                            "establish its output hold"
+                                        )
+                                    )
+                                    return
+                            else:
+                                self._begin_decision_output_hold(*output_context)
                 elif evt.type == "conversation.item.added":
                     await self._handle_evt_conversation_item_added(evt)
                 elif evt.type == "conversation.item.done":
@@ -3704,7 +4725,7 @@ class Application:
             os.environ.get("ENABLE_VOICE_MEMORY", "false").lower() == "true"
         )
         
-        # Version 0.22.4 is the serial explicit-follow-up pilot. Automatic mode
+        # Version 0.22.5 is the serial explicit-follow-up pilot. Automatic mode
         # is intentionally rejected rather than silently changing saved intent.
         follow_up_listen_seconds = parse_rapid_pilot_follow_up_seconds(
             os.environ.get("FOLLOW_UP_LISTEN_SECONDS", "0")
@@ -3955,15 +4976,19 @@ class Application:
                 self.websocket_handler.reserve_request_follow_up,
                 self.websocket_handler.activate_request_follow_up,
                 self.websocket_handler.cancel_request_follow_up,
-                self.openai_service.request_follow_up_is_sole_tool,
+                self.openai_service.request_follow_up_is_sole_terminal_tool,
             )
-            async def end_conversation_is_safe(tool_call_id: str) -> bool:
-                return (
+            async def end_conversation_is_safe(tool_call_id: str) -> Any:
+                terminal = (
                     await self.openai_service.end_conversation_is_sole_terminal_tool(
                         tool_call_id
                     )
-                    and self.websocket_handler.silent_close_is_allowed()
                 )
+                if not terminal:
+                    return False
+                if self.websocket_handler.silent_close_requires_spoken_response():
+                    return SilentCloseAuthorization.SPOKEN_RESPONSE_REQUIRED
+                return self.websocket_handler.silent_close_is_allowed()
 
             register_end_conversation_tool(
                 self.openai_service,

@@ -230,6 +230,40 @@ class RequestFollowUpToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "other_tool_active")
         self.assertIn("without asking a question", result["instruction"])
 
+    async def test_async_terminal_authorizer_completes_before_reservation(self):
+        events = []
+
+        async def terminal_authorizer(tool_call_id):
+            events.append(("terminal", tool_call_id))
+            return True
+
+        async def reserve_follow_up(tool_call_id):
+            events.append(("reserve", tool_call_id))
+            return FollowUpReservationOutcome.RESERVED
+
+        handler = create_request_follow_up_tool_handler(
+            reserve_follow_up,
+            Mock(return_value=True),
+            Mock(),
+            follow_up_is_safe=terminal_authorizer,
+        )
+
+        await handler(
+            SimpleNamespace(
+                arguments=VALID_ARGUMENTS,
+                tool_call_id="terminal-follow-up-call",
+                result_callback=AsyncMock(),
+            )
+        )
+
+        self.assertEqual(
+            events,
+            [
+                ("terminal", "terminal-follow-up-call"),
+                ("reserve", "terminal-follow-up-call"),
+            ],
+        )
+
     async def test_unavailable_reservation_does_not_imply_listening(self):
         async def unavailable(_tool_call_id):
             raise RuntimeError("no connected device")

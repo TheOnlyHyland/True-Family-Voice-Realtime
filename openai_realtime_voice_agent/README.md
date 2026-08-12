@@ -17,7 +17,7 @@ drop-in for the stock HA voice pipeline.
 > that streams audio to it →
 > **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**.
 
-> **The backend 0.22.4 firmware binding is finalized to exact firmware 0.20.0.**
+> **The backend 0.22.5 firmware binding is finalized to exact firmware 0.20.1.**
 > Update and verify firmware first, then install only the protected published
 > backend image. Until that image and GitHub release exist, keep using released
 > backend 0.21.1. A source checkout is not deployable.
@@ -30,6 +30,12 @@ drop-in for the stock HA voice pipeline.
   genuine answer within the same 120-second physical wake.
 - **Unclipped tool continuations** — generation-bound audio finishes through the
   Pipecat chunker and physical WebSocket before the next response can start.
+- **Structurally isolated controls** — managed output stays held until terminal
+  structure is valid; exact control normalization requires remote deletion and
+  local-history confirmation, while ambiguous output fails closed.
+- **No-tools terminal continuations** — follow-up questions and required spoken
+  close acknowledgements cannot dispatch another tool, and their output remains
+  bound to its exact reservation and physical wake until release.
 - **Controls Home Assistant** through the official HA *MCP Server* integration —
   lights, switches, scenes, climate, etc., scoped to both the entities you expose
   to Assist and an exact nonempty tool allow-list enforced again at dispatch.
@@ -51,8 +57,8 @@ drop-in for the stock HA voice pipeline.
 1. Add this repository to Home Assistant (Settings → Add-ons → Add-on Store → ⋮ →
    **Repositories**): `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
 2. Install the current published **True Family Voice Realtime** release and
-   configure it. Never install 0.22.4 directly from a source checkout.
-3. Before backend 0.22.4, flash exact firmware 0.20.0 from
+   configure it. Never install 0.22.5 directly from a source checkout.
+3. Before backend 0.22.5, flash exact firmware 0.20.1 from
    **[TheOnlyHyland/True-Family-Voice-Firmware](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware)**
    using its pinned ESPHome Builder stub. Later updates require deliberately
    advancing both immutable refs to the approved newer tag.

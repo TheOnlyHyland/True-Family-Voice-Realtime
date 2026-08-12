@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 import sys
 import types
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 
 ADDON_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +18,7 @@ sys.path.insert(0, str(ADDON_ROOT))
 
 from app.main import (  # noqa: E402
     Application,
+    REQUEST_FOLLOW_UP_PURPOSE,
     SafeRealtimeLLMService,
     _CURRENT_REALTIME_SESSION_GENERATION,
 )
@@ -28,12 +29,20 @@ from pipecat.transports.websocket.server import WebsocketServerParams  # noqa: E
 from pipecat.frames.frames import (  # noqa: E402
     BotStoppedSpeakingFrame,
     CancelFrame,
+    FunctionCallInProgressFrame,
+    FunctionCallResultFrame,
+    FunctionCallsStartedFrame,
+    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMTextFrame,
     OutputAudioRawFrame,
     StartFrame,
     TTSAudioRawFrame,
     TTSTextFrame,
+)
+from pipecat.processors.aggregators.llm_context import LLMContext  # noqa: E402
+from pipecat.processors.aggregators.llm_response_universal import (  # noqa: E402
+    LLMContextAggregatorPair,
 )
 from pipecat.processors.frame_processor import FrameDirection  # noqa: E402
 from pipecat.services.openai.realtime import events  # noqa: E402
@@ -223,6 +232,1251 @@ class RealPipecatTransportTests(unittest.IsolatedAsyncioTestCase):
         transport.output()
         return transport
 
+    @staticmethod
+    def _message(item_id, role, text=""):
+        content_type = "input_audio" if role == "user" else "output_audio"
+        return events.ConversationItem(
+            id=item_id,
+            type="message",
+            status="completed",
+            role=role,
+            content=[
+                events.ItemContent(
+                    type=content_type,
+                    transcript=text,
+                )
+            ],
+        )
+
+    @staticmethod
+    def _response(response_id, status, output, *, status_details=None):
+        return events.Response(
+            id=response_id,
+            object="realtime.response",
+            status=status,
+            status_details=status_details,
+            output=output,
+            usage=events.Usage(
+                total_tokens=0,
+                input_tokens=0,
+                output_tokens=0,
+                input_token_details=events.TokenDetails(),
+                output_token_details=events.TokenDetails(),
+            ),
+        )
+
+    def _wire_actual_aggregator(self, service, context):
+        pair = LLMContextAggregatorPair(context)
+        assistant = pair.assistant()
+        service._context = context
+        service.bind_context_aggregator(pair)
+        created_tasks = []
+
+        def create_task(coroutine, *_args, **_kwargs):
+            task = asyncio.create_task(coroutine)
+            created_tasks.append(task)
+            return task
+
+        service.create_task = create_task
+        assistant.create_task = create_task
+        downstream_frames = []
+
+        async def assistant_push(frame, direction=FrameDirection.DOWNSTREAM):
+            if isinstance(frame, LLMContextFrame) and direction is FrameDirection.UPSTREAM:
+                await service._handle_context(frame.context)
+            else:
+                downstream_frames.append((frame, direction))
+
+        assistant.push_frame = assistant_push
+
+        async def broadcast(frame_type, **kwargs):
+            frame = frame_type(**kwargs)
+            self.assertIsInstance(
+                frame,
+                (
+                    FunctionCallsStartedFrame,
+                    FunctionCallInProgressFrame,
+                    FunctionCallResultFrame,
+                ),
+            )
+            downstream_frames.append(
+                (
+                    frame,
+                    [
+                        dict(message)
+                        if isinstance(message, dict)
+                        else message
+                        for message in context.get_messages()
+                    ],
+                )
+            )
+            await assistant.process_frame(frame, FrameDirection.DOWNSTREAM)
+
+        service.broadcast_frame = broadcast
+        return pair, assistant, created_tasks, downstream_frames
+
+    async def _wait_for_control(self, websocket, control_type):
+        for _ in range(1000):
+            for message in websocket.messages:
+                if not isinstance(message, str):
+                    continue
+                payload = json.loads(message)
+                if payload.get("type") == control_type:
+                    return payload
+            await asyncio.sleep(0.002)
+        self.fail(f"{control_type} control was not emitted")
+
+    async def _confirm_actual_follow_up_answer(
+        self,
+        handler,
+        websocket,
+        *,
+        transcript,
+        tool_call_id,
+        item_id,
+        sequence,
+    ):
+        outcome = await handler.reserve_request_follow_up(tool_call_id)
+        self.assertEqual(outcome.value, "reserved")
+        self.assertTrue(handler.activate_request_follow_up(tool_call_id))
+        self.assertTrue(handler.arm_request_follow_up_continuation({tool_call_id}))
+        self.assertTrue(
+            handler.bind_request_follow_up_response(
+                f"{tool_call_id}-question",
+                1,
+            )
+        )
+        handler.note_request_follow_up_response_audio(f"{tool_call_id}-question")
+        handler.note_request_follow_up_playback_started()
+        handler.note_request_follow_up_response_done(
+            f"{tool_call_id}-question",
+            "completed",
+        )
+        idle_task = asyncio.create_task(handler._before_reply_idle())
+        request_payload = await self._wait_for_control(
+            websocket,
+            "request_follow_up",
+        )
+        handler._handle_request_follow_up_ack(
+            {
+                "type": "request_follow_up_ack",
+                "token": request_payload["token"],
+                "session_nonce": request_payload["session_nonce"],
+                "accepted": True,
+            }
+        )
+        await idle_task
+        reservation = handler._request_follow_up_reservation
+        if reservation is None:
+            self.fail("follow-up reservation disappeared before READY")
+        await handler._handle_device_control_message(
+            {
+                "type": "follow_up_ready",
+                "token": reservation.token,
+                "session_nonce": reservation.session_nonce,
+                "ready_nonce": sequence + 10000,
+            },
+            websocket,
+        )
+        commit_payload = await self._wait_for_control(
+            websocket,
+            "commit_follow_up",
+        )
+        await handler._handle_device_control_message(
+            {
+                **commit_payload,
+                "type": "commit_follow_up_ack",
+                "accepted": True,
+            },
+            websocket,
+        )
+        await handler._await_request_follow_up_settlements()
+        self.assertEqual(reservation.stage.name, "OPEN")
+        handler.note_request_follow_up_turn_boundary()
+        self.assertTrue(handler.bind_request_follow_up_answer(item_id, sequence))
+        self.assertTrue(
+            handler.confirm_request_follow_up_answer(
+                item_id,
+                sequence,
+                transcript,
+            )
+        )
+
+    def test_response_create_preserves_explicit_tool_disable(self):
+        event = events.ResponseCreateEvent(
+            response=events.ResponseProperties(
+                output_modalities=["audio"],
+                tools=[],
+                tool_choice="none",
+            )
+        )
+
+        payload = event.model_dump(exclude_none=True)
+
+        self.assertEqual(payload["response"]["tools"], [])
+        self.assertEqual(payload["response"]["tool_choice"], "none")
+
+    async def test_actual_mixed_follow_up_normalizes_through_result_aggregator(self):
+        usage_patch = patch("app.ha_sensors.PUBLISHER.usage", new=AsyncMock())
+        usage_patch.start()
+        self.addCleanup(usage_patch.stop)
+        context = LLMContext(messages=[{"role": "user", "content": "Help me choose"}])
+        service = SafeRealtimeLLMService(
+            api_key="probe",
+            max_context_turns=12,
+            authorized_tool_names=("request_follow_up", "end_conversation"),
+        )
+        pair, _assistant, created_tasks, aggregator_frames = (
+            self._wire_actual_aggregator(service, context)
+        )
+        service._conversation_window.begin_user_turn(
+            self._message("mixed-user", "user").model_dump(exclude_none=True)
+        )
+        service._conversation_window.attach_transcript(
+            "mixed-user",
+            "Help me choose",
+        )
+        service._conversation_window.activate("mixed-user")
+        service._context = context
+        service._api_session_ready = True
+        service._current_audio_response = None
+        service.stop_ttfb_metrics = AsyncMock()
+        service.start_llm_usage_metrics = AsyncMock()
+        service.stop_processing_metrics = AsyncMock()
+        service.retrieve_conversation_item = AsyncMock(
+            side_effect=Exception("invalid item id")
+        )
+        service.push_error = AsyncMock()
+        sent_events = []
+
+        async def send_client_event(event):
+            sent_events.append(event)
+
+        service.send_client_event = send_client_event
+        physical_frames = []
+
+        async def push_frame(frame, direction=FrameDirection.DOWNSTREAM):
+            physical_frames.append(frame)
+            await pair.assistant().process_frame(frame, direction)
+
+        service.push_frame = push_frame
+        service._assistant_output_response_created = AsyncMock(return_value=True)
+        service._assistant_output_frame_created = Mock(return_value=True)
+
+        websocket = _Socket()
+        handler = WebSocketHandler(follow_up_ms=0)
+        handler._websockets = {websocket}
+        handler._active_session_nonce = 9101
+        handler._clear_device_input = AsyncMock()
+        self.assertTrue(handler.note_device_wake(1))
+        service.set_request_follow_up_event_handlers(
+            on_response_created=handler.bind_request_follow_up_response,
+            on_response_audio=handler.note_request_follow_up_response_audio,
+            on_response_done=handler.note_request_follow_up_response_done,
+            on_response_failed=handler.note_request_follow_up_response_failed,
+            on_continuation_arm=handler.arm_request_follow_up_continuation,
+            on_continuation_failed=handler.fail_request_follow_up_continuation,
+            on_question_output_authorized=(
+                handler.request_follow_up_question_output_is_current
+            ),
+        )
+        application = Application()
+        application.request_follow_up_supported = True
+        application.openai_service = service
+        application.websocket_handler = handler
+        application._register_conversation_control_tool()
+
+        response_id = "mixed-follow-up-a"
+        call_id = "mixed-follow-up-call"
+        assistant_item = self._message(
+            "mixed-unheard-question",
+            "assistant",
+            "Which cuisine?",
+        )
+        function_item = events.ConversationItem(
+            id="mixed-follow-up-item",
+            type="function_call",
+            status="completed",
+            call_id=call_id,
+            name="request_follow_up",
+            arguments=json.dumps({"purpose": REQUEST_FOLLOW_UP_PURPOSE}),
+        )
+        service._active_response_id = response_id
+        service._output_response_generation = 1
+        service._active_output_response_context = (response_id, 1)
+        self.assertTrue(service._begin_decision_output_hold(response_id, 1))
+        for item in (assistant_item, function_item):
+            await service._handle_evt_conversation_item_added(
+                types.SimpleNamespace(item=item)
+            )
+        await service._handle_evt_function_call_arguments_done(
+            events.ResponseFunctionCallArgumentsDone(
+                event_id="mixed-args-done",
+                type="response.function_call_arguments.done",
+                response_id=response_id,
+                item_id=function_item.id,
+                output_index=1,
+                call_id=call_id,
+                arguments=function_item.arguments,
+            )
+        )
+        for _ in range(500):
+            if call_id in service._running_tool_call_ids:
+                break
+            await asyncio.sleep(0.002)
+        self.assertIn(
+            call_id,
+            service._running_tool_call_ids,
+            msg=(
+                f"scheduled={service._scheduled_tool_call_ids} "
+                f"pending={list(service._pending_function_calls)} "
+                f"tasks={[repr(task.exception()) if task.done() and not task.cancelled() else repr(task) for task in created_tasks]}"
+            ),
+        )
+        await service._handle_evt_audio_delta(
+            events.ResponseAudioDelta(
+                event_id="mixed-audio-a",
+                type="response.output_audio.delta",
+                response_id=response_id,
+                item_id=assistant_item.id,
+                output_index=0,
+                content_index=0,
+                delta=base64.b64encode(b"unheard mixed question").decode("ascii"),
+            )
+        )
+        self.assertFalse(
+            any(isinstance(frame, TTSAudioRawFrame) for frame in physical_frames)
+        )
+        service.stop_ttfb_metrics.assert_not_awaited()
+
+        await service._handle_evt_response_done(
+            events.ResponseDone(
+                event_id="mixed-response-done",
+                type="response.done",
+                response=self._response(
+                    response_id,
+                    "completed",
+                    [assistant_item, function_item],
+                ),
+            )
+        )
+        for _ in range(1000):
+            if any(
+                getattr(event, "type", None) == "response.create"
+                and event.response is not None
+                and event.response.tools == []
+                and event.response.tool_choice == "none"
+                for event in sent_events
+            ):
+                break
+            await asyncio.sleep(0.002)
+        no_tools_events = [
+            event
+            for event in sent_events
+            if getattr(event, "type", None) == "response.create"
+            and event.response is not None
+            and event.response.tools == []
+            and event.response.tool_choice == "none"
+        ]
+        self.assertEqual(len(no_tools_events), 1)
+        result_snapshots = [
+            snapshot
+            for frame, snapshot in aggregator_frames
+            if isinstance(frame, FunctionCallResultFrame)
+            and frame.tool_call_id == call_id
+        ]
+        self.assertEqual(len(result_snapshots), 1)
+        self.assertEqual(
+            [
+                message
+                for message in result_snapshots[0]
+                if message.get("role") == "tool"
+                and message.get("tool_call_id") == call_id
+            ],
+            [
+                {
+                    "role": "tool",
+                    "content": "IN_PROGRESS",
+                    "tool_call_id": call_id,
+                }
+            ],
+        )
+        self.assertEqual(
+            [
+                event.item_id
+                for event in sent_events
+                if getattr(event, "type", None) == "conversation.item.delete"
+            ],
+            [assistant_item.id],
+        )
+
+        tool_output = events.ConversationItem(
+            id="mixed-follow-up-output",
+            type="function_call_output",
+            status="completed",
+            call_id=call_id,
+            output=json.dumps({"status": "follow_up_reserved"}),
+        )
+        response_b_item = self._message(
+            "mixed-follow-up-question",
+            "assistant",
+            "Which cuisine would you like?",
+        )
+        response_b = self._response(
+            "mixed-follow-up-b",
+            "completed",
+            [response_b_item],
+        )
+        keep_reader_open = asyncio.Event()
+
+        async def response_b_events():
+            payloads = [
+                events.ConversationItemAdded(
+                    event_id="mixed-output-added",
+                    type="conversation.item.added",
+                    item=tool_output,
+                ).model_dump(),
+                events.ResponseCreated(
+                    event_id="mixed-b-created",
+                    type="response.created",
+                    response=self._response(
+                        "mixed-follow-up-b",
+                        "in_progress",
+                        [],
+                    ),
+                ).model_dump(),
+                events.ConversationItemAdded(
+                    event_id="mixed-b-item-added",
+                    type="conversation.item.added",
+                    item=response_b_item,
+                ).model_dump(),
+                events.ResponseAudioTranscriptDelta(
+                    event_id="mixed-b-transcript",
+                    type="response.output_audio_transcript.delta",
+                    response_id="mixed-follow-up-b",
+                    item_id=response_b_item.id,
+                    output_index=0,
+                    content_index=0,
+                    delta="Which cuisine would you like?",
+                ).model_dump(),
+                events.ResponseAudioDelta(
+                    event_id="mixed-b-audio",
+                    type="response.output_audio.delta",
+                    response_id="mixed-follow-up-b",
+                    item_id=response_b_item.id,
+                    output_index=0,
+                    content_index=0,
+                    delta=base64.b64encode(b"one physical question").decode("ascii"),
+                ).model_dump(),
+                events.ResponseDone(
+                    event_id="mixed-b-done",
+                    type="response.done",
+                    response=response_b,
+                ).model_dump(),
+            ]
+            for payload in payloads:
+                yield json.dumps(payload)
+            await keep_reader_open.wait()
+
+        service._websocket = response_b_events()
+        receive_task = asyncio.create_task(service._receive_task_handler())
+        for _ in range(1000):
+            if service._decision_output_hold is None and handler._request_follow_up_reservation:
+                reservation = handler._request_follow_up_reservation
+                if reservation.response_completed:
+                    break
+            await asyncio.sleep(0.002)
+        audio = [
+            frame.audio
+            for frame in physical_frames
+            if isinstance(frame, TTSAudioRawFrame)
+        ]
+        reader_error = (
+            receive_task.exception()
+            if receive_task.done() and not receive_task.cancelled()
+            else None
+        )
+        self.assertEqual(
+            audio,
+            [b"one physical question"],
+            msg=(
+                f"recovery={service._recovery_active} "
+                f"hold={service._decision_output_hold!r} "
+                f"mode={service._tool_disabled_response_modes!r} "
+                f"reservation={handler._request_follow_up_reservation!r} "
+                f"reader_error={reader_error!r} "
+                f"errors={service.push_error.await_args_list!r}"
+            ),
+        )
+        self.assertNotIn(b"unheard mixed question", audio)
+        service.stop_ttfb_metrics.assert_awaited_once()
+        bound_reservation = handler._request_follow_up_reservation
+        if bound_reservation is None:
+            self.fail("bound follow-up reservation disappeared")
+        self.assertEqual(bound_reservation.response_generation, 2)
+        self.assertEqual(
+            bound_reservation.expires_at,
+            handler._physical_wake_deadline,
+        )
+        self.assertGreater(
+            bound_reservation.expires_at - time.monotonic(),
+            15.0,
+        )
+        self.assertNotIn(
+            assistant_item.id,
+            [
+                item.get("id")
+                for turn in service._conversation_window.turns
+                for item in turn.items
+            ],
+        )
+        self.assertNotIn(
+            "Which cuisine?",
+            str(context.get_messages()),
+        )
+        replay_items = [
+            item.get("id")
+            for turn in service._conversation_window.replay_snapshot()
+            for item in turn.items
+        ]
+        self.assertNotIn(assistant_item.id, replay_items)
+
+        handler.note_request_follow_up_playback_started()
+        idle_task = asyncio.create_task(handler._before_reply_idle())
+        request_payload = None
+        for _ in range(1000):
+            for message in websocket.messages:
+                if not isinstance(message, str):
+                    continue
+                candidate = json.loads(message)
+                if candidate.get("type") == "request_follow_up":
+                    request_payload = candidate
+                    break
+            if request_payload is not None:
+                break
+            await asyncio.sleep(0.002)
+        self.assertIsNotNone(request_payload)
+        if request_payload is None:
+            self.fail("request_follow_up control was not emitted")
+        handler._handle_request_follow_up_ack(
+            {
+                "type": "request_follow_up_ack",
+                "token": request_payload["token"],
+                "session_nonce": request_payload["session_nonce"],
+                "accepted": True,
+            }
+        )
+        await idle_task
+        reservation = handler._request_follow_up_reservation
+        self.assertIsNotNone(reservation)
+        if reservation is None:
+            self.fail("follow-up reservation disappeared before READY")
+        ready_nonce = 9102
+        await handler._handle_device_control_message(
+            {
+                "type": "follow_up_ready",
+                "token": reservation.token,
+                "session_nonce": reservation.session_nonce,
+                "ready_nonce": ready_nonce,
+            },
+            websocket,
+        )
+        commit_payload = None
+        for _ in range(1000):
+            for message in websocket.messages:
+                if not isinstance(message, str):
+                    continue
+                candidate = json.loads(message)
+                if candidate.get("type") == "commit_follow_up":
+                    commit_payload = candidate
+                    break
+            if commit_payload is not None:
+                break
+            await asyncio.sleep(0.002)
+        self.assertIsNotNone(commit_payload)
+        if commit_payload is None:
+            self.fail("commit_follow_up control was not emitted")
+        await handler._handle_device_control_message(
+            {
+                **commit_payload,
+                "type": "commit_follow_up_ack",
+                "accepted": True,
+            },
+            websocket,
+        )
+        await handler._await_request_follow_up_settlements()
+        self.assertEqual(reservation.stage.name, "OPEN")
+        handler.cancel_request_follow_up(send_cancel=False)
+
+        receive_task.cancel()
+        await asyncio.gather(receive_task, return_exceptions=True)
+        service.begin_recovery()
+        for task in created_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*created_tasks, return_exceptions=True)
+        await handler.cleanup()
+
+    async def test_actual_mixed_end_normalizes_before_spoken_or_silent_close(self):
+        usage_patch = patch("app.ha_sensors.PUBLISHER.usage", new=AsyncMock())
+        usage_patch.start()
+        self.addCleanup(usage_patch.stop)
+
+        async def run_case(transcript, *, semantic_veto, case_number):
+            websocket = _Socket()
+            handler = WebSocketHandler(follow_up_ms=0)
+            handler._websockets = {websocket}
+            handler._active_session_nonce = 9200 + case_number
+            handler._clear_device_input = AsyncMock()
+            self.assertTrue(handler.note_device_wake(1))
+            user_item_id = f"mixed-end-user-{case_number}"
+            sequence = 20 + case_number
+            await self._confirm_actual_follow_up_answer(
+                handler,
+                websocket,
+                transcript=transcript,
+                tool_call_id=f"prior-follow-up-{case_number}",
+                item_id=user_item_id,
+                sequence=sequence,
+            )
+            grant = handler._request_follow_up_answer_grant
+            self.assertIsNotNone(grant)
+            if grant is None:
+                self.fail("confirmed follow-up answer grant was not retained")
+            self.assertEqual(grant.semantic_close_veto, semantic_veto)
+
+            context = LLMContext(messages=[{"role": "user", "content": transcript}])
+            service = SafeRealtimeLLMService(
+                api_key="probe",
+                max_context_turns=12,
+                authorized_tool_names=("request_follow_up", "end_conversation"),
+            )
+            pair, _assistant, created_tasks, aggregator_frames = (
+                self._wire_actual_aggregator(service, context)
+            )
+            service._conversation_window.begin_user_turn(
+                self._message(user_item_id, "user").model_dump(exclude_none=True)
+            )
+            service._conversation_window.attach_transcript(user_item_id, transcript)
+            service._conversation_window.activate(user_item_id)
+            service._confirmed_follow_up_answer_identity = (user_item_id, sequence)
+            service._api_session_ready = True
+            service._current_audio_response = None
+            service.stop_ttfb_metrics = AsyncMock()
+            service.start_llm_usage_metrics = AsyncMock()
+            service.stop_processing_metrics = AsyncMock()
+            service.retrieve_conversation_item = AsyncMock(
+                side_effect=Exception("invalid item id")
+            )
+            service.push_error = AsyncMock()
+            sent_events = []
+
+            async def send_client_event(event):
+                sent_events.append(event)
+
+            service.send_client_event = send_client_event
+            physical_frames = []
+
+            async def push_frame(frame, direction=FrameDirection.DOWNSTREAM):
+                physical_frames.append(frame)
+                await pair.assistant().process_frame(frame, direction)
+
+            service.push_frame = push_frame
+            service._assistant_output_response_created = AsyncMock(return_value=True)
+            service._assistant_output_frame_created = Mock(return_value=True)
+            service.set_spoken_close_response_authorizer(
+                handler.silent_close_requires_spoken_response
+            )
+            close_silently = AsyncMock()
+            handler.request_silent_close = close_silently
+            application = Application()
+            application.request_follow_up_supported = True
+            application.openai_service = service
+            application.websocket_handler = handler
+            application._register_conversation_control_tool()
+
+            response_id = f"mixed-end-a-{case_number}"
+            call_id = f"mixed-end-call-{case_number}"
+            unheard_item = self._message(
+                f"mixed-end-unheard-{case_number}",
+                "assistant",
+                "Unheard goodbye",
+            )
+            function_item = events.ConversationItem(
+                id=f"mixed-end-function-{case_number}",
+                type="function_call",
+                status="completed",
+                call_id=call_id,
+                name="end_conversation",
+                arguments="{}",
+            )
+            service._active_response_id = response_id
+            service._output_response_generation = 1
+            service._active_output_response_context = (response_id, 1)
+            self.assertTrue(service._begin_decision_output_hold(response_id, 1))
+            for item in (unheard_item, function_item):
+                await service._handle_evt_conversation_item_added(
+                    types.SimpleNamespace(item=item)
+                )
+            await service._handle_evt_function_call_arguments_done(
+                events.ResponseFunctionCallArgumentsDone(
+                    event_id=f"mixed-end-args-{case_number}",
+                    type="response.function_call_arguments.done",
+                    response_id=response_id,
+                    item_id=function_item.id,
+                    output_index=1,
+                    call_id=call_id,
+                    arguments="{}",
+                )
+            )
+            for _ in range(500):
+                if call_id in service._running_tool_call_ids:
+                    break
+                await asyncio.sleep(0.002)
+            self.assertIn(call_id, service._running_tool_call_ids)
+            await service._handle_evt_audio_delta(
+                events.ResponseAudioDelta(
+                    event_id=f"mixed-end-audio-{case_number}",
+                    type="response.output_audio.delta",
+                    response_id=response_id,
+                    item_id=unheard_item.id,
+                    output_index=0,
+                    content_index=0,
+                    delta=base64.b64encode(b"unheard goodbye pcm").decode("ascii"),
+                )
+            )
+            await service._handle_evt_response_done(
+                events.ResponseDone(
+                    event_id=f"mixed-end-done-{case_number}",
+                    type="response.done",
+                    response=self._response(
+                        response_id,
+                        "completed",
+                        [unheard_item, function_item],
+                    ),
+                )
+            )
+
+            for _ in range(1000):
+                result_seen = any(
+                    isinstance(frame, FunctionCallResultFrame)
+                    and frame.tool_call_id == call_id
+                    for frame, _snapshot in aggregator_frames
+                )
+                if result_seen:
+                    break
+                await asyncio.sleep(0.002)
+            result_snapshots = [
+                snapshot
+                for frame, snapshot in aggregator_frames
+                if isinstance(frame, FunctionCallResultFrame)
+                and frame.tool_call_id == call_id
+            ]
+            self.assertEqual(len(result_snapshots), 1)
+            self.assertEqual(
+                [
+                    message
+                    for message in result_snapshots[0]
+                    if message.get("role") == "tool"
+                    and message.get("tool_call_id") == call_id
+                ],
+                [
+                    {
+                        "role": "tool",
+                        "content": "IN_PROGRESS",
+                        "tool_call_id": call_id,
+                    }
+                ],
+            )
+            self.assertEqual(
+                [
+                    event.item_id
+                    for event in sent_events
+                    if getattr(event, "type", None) == "conversation.item.delete"
+                ],
+                [unheard_item.id],
+            )
+            tool_output = events.ConversationItem(
+                id=f"mixed-end-output-{case_number}",
+                type="function_call_output",
+                status="completed",
+                call_id=call_id,
+                output=json.dumps(
+                    {
+                        "status": (
+                            "spoken_response_required"
+                            if semantic_veto
+                            else "closed_silently"
+                        )
+                    }
+                ),
+            )
+            await service._handle_evt_conversation_item_added(
+                types.SimpleNamespace(item=tool_output)
+            )
+
+            if semantic_veto:
+                close_silently.assert_not_awaited()
+                for _ in range(1000):
+                    if any(
+                        getattr(event, "type", None) == "response.create"
+                        and event.response is not None
+                        and event.response.tools == []
+                        and event.response.tool_choice == "none"
+                        for event in sent_events
+                    ):
+                        break
+                    await asyncio.sleep(0.002)
+                response_b_item = self._message(
+                    f"mixed-end-ack-{case_number}",
+                    "assistant",
+                    "Of course.",
+                )
+                keep_reader_open = asyncio.Event()
+
+                async def response_b_events():
+                    payloads = [
+                        events.ResponseCreated(
+                            event_id=f"mixed-end-b-created-{case_number}",
+                            type="response.created",
+                            response=self._response(
+                                f"mixed-end-b-{case_number}",
+                                "in_progress",
+                                [],
+                            ),
+                        ).model_dump(),
+                        events.ConversationItemAdded(
+                            event_id=f"mixed-end-b-item-{case_number}",
+                            type="conversation.item.added",
+                            item=response_b_item,
+                        ).model_dump(),
+                        events.ResponseAudioTranscriptDelta(
+                            event_id=f"mixed-end-b-text-{case_number}",
+                            type="response.output_audio_transcript.delta",
+                            response_id=f"mixed-end-b-{case_number}",
+                            item_id=response_b_item.id,
+                            output_index=0,
+                            content_index=0,
+                            delta="Of course.",
+                        ).model_dump(),
+                        events.ResponseAudioDelta(
+                            event_id=f"mixed-end-b-audio-{case_number}",
+                            type="response.output_audio.delta",
+                            response_id=f"mixed-end-b-{case_number}",
+                            item_id=response_b_item.id,
+                            output_index=0,
+                            content_index=0,
+                            delta=base64.b64encode(b"one acknowledgement").decode(
+                                "ascii"
+                            ),
+                        ).model_dump(),
+                        events.ResponseDone(
+                            event_id=f"mixed-end-b-done-{case_number}",
+                            type="response.done",
+                            response=self._response(
+                                f"mixed-end-b-{case_number}",
+                                "completed",
+                                [response_b_item],
+                            ),
+                        ).model_dump(),
+                    ]
+                    for payload in payloads:
+                        yield json.dumps(payload)
+                    await keep_reader_open.wait()
+
+                service._websocket = response_b_events()
+                receive_task = asyncio.create_task(service._receive_task_handler())
+                for _ in range(1000):
+                    if service._decision_output_hold is None and not (
+                        service._tool_disabled_response_modes
+                    ):
+                        if any(
+                            isinstance(frame, TTSAudioRawFrame)
+                            for frame in physical_frames
+                        ):
+                            break
+                    await asyncio.sleep(0.002)
+                receive_task.cancel()
+                await asyncio.gather(receive_task, return_exceptions=True)
+                audio = [
+                    frame.audio
+                    for frame in physical_frames
+                    if isinstance(frame, TTSAudioRawFrame)
+                ]
+                self.assertEqual(audio, [b"one acknowledgement"])
+            else:
+                close_silently.assert_awaited_once_with()
+                for _ in range(1000):
+                    if service._conversation_window.active_turn_id is None:
+                        break
+                    await asyncio.sleep(0.002)
+                self.assertIsNone(service._conversation_window.active_turn_id)
+                self.assertFalse(
+                    any(
+                        getattr(event, "type", None) == "response.create"
+                        for event in sent_events
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        isinstance(frame, TTSAudioRawFrame)
+                        for frame in physical_frames
+                    )
+                )
+
+            self.assertNotIn("Unheard goodbye", str(context.get_messages()))
+            replay_items = [
+                item.get("id")
+                for turn in service._conversation_window.replay_snapshot()
+                for item in turn.items
+            ]
+            self.assertNotIn(unheard_item.id, replay_items)
+            self.assertFalse(service._recovery_active)
+            handler.invalidate_request_follow_up_turn(send_cancel=False)
+            service.begin_recovery()
+            for task in created_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*created_tasks, return_exceptions=True)
+            await handler.cleanup()
+
+        await run_case(
+            "thanks i know what i want now a chinese",
+            semantic_veto=True,
+            case_number=1,
+        )
+        await run_case(
+            "purple dishwasher",
+            semantic_veto=False,
+            case_number=2,
+        )
+
+    async def test_actual_tool_disabled_response_cannot_dispatch_mutation(self):
+        context = LLMContext(messages=[{"role": "user", "content": "Continue"}])
+        service = SafeRealtimeLLMService(
+            api_key="probe",
+            max_context_turns=12,
+            authorized_tool_names=("mutate_home",),
+        )
+        service._context = context
+        service._conversation_window.begin_user_turn(
+            self._message("mutation-user", "user").model_dump(exclude_none=True)
+        )
+        service._conversation_window.attach_transcript("mutation-user", "Continue")
+        service._conversation_window.activate("mutation-user")
+        mutation = AsyncMock()
+        service.register_function("mutate_home", mutation)
+        service._pending_tool_disabled_response_mode = "follow_up_question"
+        service._request_follow_up_response_created = Mock(return_value=True)
+        service._assistant_output_response_created = AsyncMock(return_value=True)
+        service._assistant_output_frame_created = Mock(return_value=True)
+        service._current_audio_response = None
+        service.stop_ttfb_metrics = AsyncMock()
+        service.push_error = AsyncMock()
+        physical_frames = []
+        service.push_frame = AsyncMock(
+            side_effect=lambda frame, *_args: physical_frames.append(frame)
+        )
+        sent_events = []
+
+        async def send_client_event(event):
+            sent_events.append(event)
+
+        service.send_client_event = send_client_event
+        function_item = events.ConversationItem(
+            id="forbidden-mutation-item",
+            type="function_call",
+            status="completed",
+            call_id="forbidden-mutation-call",
+            name="mutate_home",
+            arguments="{}",
+        )
+        keep_reader_open = asyncio.Event()
+
+        async def server_events():
+            payloads = [
+                events.ResponseCreated(
+                    event_id="mutation-response-created",
+                    type="response.created",
+                    response=self._response(
+                        "mutation-response",
+                        "in_progress",
+                        [],
+                    ),
+                ).model_dump(),
+                events.ResponseAudioDelta(
+                    event_id="mutation-preface-audio",
+                    type="response.output_audio.delta",
+                    response_id="mutation-response",
+                    item_id="mutation-preface",
+                    output_index=0,
+                    content_index=0,
+                    delta=base64.b64encode(b"must stay quarantined").decode("ascii"),
+                ).model_dump(),
+                events.ConversationItemAdded(
+                    event_id="mutation-item-added",
+                    type="conversation.item.added",
+                    item=function_item,
+                ).model_dump(),
+                events.ResponseFunctionCallArgumentsDone(
+                    event_id="mutation-arguments-done",
+                    type="response.function_call_arguments.done",
+                    response_id="mutation-response",
+                    item_id=function_item.id,
+                    output_index=1,
+                    call_id=function_item.call_id,
+                    arguments="{}",
+                ).model_dump(),
+            ]
+            for payload in payloads:
+                yield json.dumps(payload)
+            await keep_reader_open.wait()
+
+        service._websocket = server_events()
+        receive_task = asyncio.create_task(service._receive_task_handler())
+        for _ in range(1000):
+            if service._recovery_active:
+                break
+            await asyncio.sleep(0.002)
+
+        self.assertTrue(service._recovery_active)
+        mutation.assert_not_awaited()
+        self.assertIn(
+            function_item.call_id,
+            service._discarded_tool_result_ids,
+        )
+        self.assertFalse(
+            any(isinstance(frame, TTSAudioRawFrame) for frame in physical_frames)
+        )
+        self.assertTrue(
+            any(getattr(event, "type", None) == "response.cancel" for event in sent_events)
+        )
+        self.assertTrue(
+            any(
+                "quarantined before dispatch" in call.kwargs["error_msg"]
+                for call in service.push_error.await_args_list
+            )
+        )
+        receive_task.cancel()
+        await asyncio.gather(receive_task, return_exceptions=True)
+
+    async def test_actual_non_completed_response_discards_held_output(self):
+        usage_patch = patch("app.ha_sensors.PUBLISHER.usage", new=AsyncMock())
+        usage_patch.start()
+        self.addCleanup(usage_patch.stop)
+        for case_number, status in enumerate(
+            ("cancelled", "failed", "incomplete"),
+            start=1,
+        ):
+            with self.subTest(status=status):
+                context = LLMContext(
+                    messages=[{"role": "user", "content": "Test failure"}]
+                )
+                service = SafeRealtimeLLMService(
+                    api_key="probe",
+                    max_context_turns=12,
+                    authorized_tool_names=("request_follow_up", "end_conversation"),
+                )
+                pair, _assistant, created_tasks, _aggregator_frames = (
+                    self._wire_actual_aggregator(service, context)
+                )
+                user_item_id = f"failed-status-user-{case_number}"
+                service._conversation_window.begin_user_turn(
+                    self._message(user_item_id, "user").model_dump(exclude_none=True)
+                )
+                service._conversation_window.attach_transcript(
+                    user_item_id,
+                    "Test failure",
+                )
+                service._conversation_window.activate(user_item_id)
+                service._assistant_output_response_created = AsyncMock(
+                    return_value=True
+                )
+                service._assistant_output_frame_created = Mock(return_value=True)
+                service._current_audio_response = None
+                service.stop_ttfb_metrics = AsyncMock()
+                service.stop_processing_metrics = AsyncMock()
+                service.push_error = AsyncMock()
+                physical_frames = []
+
+                async def push_frame(frame, direction=FrameDirection.DOWNSTREAM):
+                    physical_frames.append(frame)
+                    await pair.assistant().process_frame(frame, direction)
+
+                service.push_frame = push_frame
+                response_id = f"failed-status-response-{case_number}"
+                assistant_item = self._message(
+                    f"failed-status-assistant-{case_number}",
+                    "assistant",
+                    "Must not escape",
+                )
+
+                async def server_events():
+                    payloads = [
+                        events.ResponseCreated(
+                            event_id=f"failed-status-created-{case_number}",
+                            type="response.created",
+                            response=self._response(
+                                response_id,
+                                "in_progress",
+                                [],
+                            ),
+                        ).model_dump(),
+                        events.ConversationItemAdded(
+                            event_id=f"failed-status-item-{case_number}",
+                            type="conversation.item.added",
+                            item=assistant_item,
+                        ).model_dump(),
+                        events.ResponseAudioDelta(
+                            event_id=f"failed-status-audio-{case_number}",
+                            type="response.output_audio.delta",
+                            response_id=response_id,
+                            item_id=assistant_item.id,
+                            output_index=0,
+                            content_index=0,
+                            delta=base64.b64encode(b"failed response pcm").decode(
+                                "ascii"
+                            ),
+                        ).model_dump(),
+                        events.ResponseDone(
+                            event_id=f"failed-status-done-{case_number}",
+                            type="response.done",
+                            response=self._response(
+                                response_id,
+                                status,
+                                [assistant_item],
+                                status_details=(
+                                    {"error": {"message": "probe failure"}}
+                                    if status == "failed"
+                                    else {"reason": "probe terminal status"}
+                                ),
+                            ),
+                        ).model_dump(),
+                    ]
+                    for payload in payloads:
+                        yield json.dumps(payload)
+
+                service._websocket = server_events()
+                await service._receive_task_handler()
+
+                self.assertTrue(service._recovery_active)
+                self.assertIsNone(service._decision_output_hold)
+                self.assertFalse(
+                    any(
+                        isinstance(frame, TTSAudioRawFrame)
+                        for frame in physical_frames
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        status in call.kwargs["error_msg"]
+                        for call in service.push_error.await_args_list
+                    )
+                )
+                for task in created_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*created_tasks, return_exceptions=True)
+
+    async def test_actual_empty_terminal_output_discards_audio_before_ttfb(self):
+        usage_patch = patch("app.ha_sensors.PUBLISHER.usage", new=AsyncMock())
+        usage_patch.start()
+        self.addCleanup(usage_patch.stop)
+        context = LLMContext(
+            messages=[{"role": "user", "content": "Say something"}]
+        )
+        service = SafeRealtimeLLMService(
+            api_key="probe",
+            max_context_turns=12,
+            authorized_tool_names=("request_follow_up", "end_conversation"),
+        )
+        pair, _assistant, created_tasks, _aggregator_frames = (
+            self._wire_actual_aggregator(service, context)
+        )
+        service._conversation_window.begin_user_turn(
+            self._message("empty-output-user", "user").model_dump(exclude_none=True)
+        )
+        service._conversation_window.attach_transcript(
+            "empty-output-user",
+            "Say something",
+        )
+        service._conversation_window.activate("empty-output-user")
+        service._assistant_output_response_created = AsyncMock(return_value=True)
+        service._assistant_output_frame_created = Mock(return_value=True)
+        service._current_audio_response = None
+        service.stop_ttfb_metrics = AsyncMock()
+        service.stop_processing_metrics = AsyncMock()
+        service.push_error = AsyncMock()
+        physical_frames = []
+
+        async def push_frame(frame, direction=FrameDirection.DOWNSTREAM):
+            physical_frames.append(frame)
+            await pair.assistant().process_frame(frame, direction)
+
+        service.push_frame = push_frame
+
+        async def server_events():
+            payloads = [
+                events.ResponseCreated(
+                    event_id="empty-output-created",
+                    type="response.created",
+                    response=self._response(
+                        "empty-output-response",
+                        "in_progress",
+                        [],
+                    ),
+                ).model_dump(),
+                events.ResponseAudioDelta(
+                    event_id="empty-output-audio",
+                    type="response.output_audio.delta",
+                    response_id="empty-output-response",
+                    item_id="missing-assistant-item",
+                    output_index=0,
+                    content_index=0,
+                    delta=base64.b64encode(b"must never be audible").decode(
+                        "ascii"
+                    ),
+                ).model_dump(),
+                events.ResponseDone(
+                    event_id="empty-output-done",
+                    type="response.done",
+                    response=self._response(
+                        "empty-output-response",
+                        "completed",
+                        [],
+                    ),
+                ).model_dump(),
+            ]
+            for payload in payloads:
+                yield json.dumps(payload)
+
+        service._websocket = server_events()
+        await service._receive_task_handler()
+
+        self.assertTrue(service._recovery_active)
+        self.assertFalse(
+            any(isinstance(frame, TTSAudioRawFrame) for frame in physical_frames)
+        )
+        service.stop_ttfb_metrics.assert_not_awaited()
+        self.assertEqual(
+            context.get_messages(),
+            [{"role": "user", "content": "Say something"}],
+        )
+        self.assertEqual(
+            service._conversation_window.active_turn_id,
+            "empty-output-user",
+        )
+        self.assertTrue(
+            any(
+                "structurally replayable" in call.kwargs["error_msg"]
+                for call in service.push_error.await_args_list
+            )
+        )
+        for task in created_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*created_tasks, return_exceptions=True)
+
     async def test_application_registers_only_the_exact_exposed_mcp_subset(self):
         application = Application()
         application.openai_api_key = "probe"
@@ -392,7 +1646,6 @@ class RealPipecatTransportTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
-        service.set_silent_close_runtime_authorizer(lambda: True)
         service._conversation_window.begin_user_turn(
             {
                 "id": "answer-user",
@@ -426,8 +1679,36 @@ class RealPipecatTransportTests(unittest.IsolatedAsyncioTestCase):
             arguments="{}",
         )
         service._response_tool_call_ids[("decision-response", 1)] = {call_id}
+        service._tool_call_response_contexts[call_id] = (
+            "decision-response",
+            1,
+        )
+        service._tool_call_generations[call_id] = service._session_generation
         service._tool_call_details[call_id] = ("end_conversation", {})
         service._running_tool_call_ids.add(call_id)
+        original_in_flight = TURN_LIVENESS.in_flight
+        self.addCleanup(
+            setattr,
+            TURN_LIVENESS,
+            "in_flight",
+            original_in_flight,
+        )
+        TURN_LIVENESS.in_flight = 1
+        terminal_authorization = asyncio.create_task(
+            service.end_conversation_is_sole_terminal_tool(call_id)
+        )
+
+        async def cancel_terminal_authorization():
+            if not terminal_authorization.done():
+                terminal_authorization.cancel()
+            await asyncio.gather(
+                terminal_authorization,
+                return_exceptions=True,
+            )
+
+        self.addAsyncCleanup(cancel_terminal_authorization)
+        await asyncio.sleep(0)
+        self.assertFalse(terminal_authorization.done())
 
         await service._handle_evt_audio_delta(
             events.ResponseAudioDelta(
@@ -498,6 +1779,8 @@ class RealPipecatTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(isinstance(frame, TTSTextFrame) for frame in pushed))
         self.assertFalse(any(isinstance(frame, LLMTextFrame) for frame in pushed))
         self.assertFalse(any(isinstance(message, bytes) for message in websocket.messages))
+        self.assertTrue(await terminal_authorization)
+        TURN_LIVENESS.in_flight = original_in_flight
         service._running_tool_call_ids.clear()
         service.begin_recovery()
         await transport.retire_client(websocket)
@@ -1248,6 +2531,89 @@ class RealPipecatTransportTests(unittest.IsolatedAsyncioTestCase):
             emitter._cancel_watchdog()
         await output.cancel(CancelFrame())
         await transport.cleanup_uncertain_sockets()
+
+    async def test_actual_held_model_activity_outlives_watchdog_but_stall_fails_closed(self):
+        service = SafeRealtimeLLMService(
+            api_key="probe",
+            max_context_turns=12,
+            authorized_tool_names=("request_follow_up", "end_conversation"),
+        )
+        service._context = LLMContext()
+        service._conversation_window.begin_user_turn(
+            self._message("watchdog-user", "user").model_dump(exclude_none=True)
+        )
+        service._conversation_window.attach_transcript("watchdog-user", "Keep going")
+        service._conversation_window.activate("watchdog-user")
+        service._active_response_id = "watchdog-response"
+        service._active_output_response_context = ("watchdog-response", 1)
+        self.assertTrue(service._begin_decision_output_hold("watchdog-response", 1))
+        service.push_frame = AsyncMock()
+        service.push_error = AsyncMock()
+        phases = []
+
+        async def send_phase(value):
+            phases.append(value)
+
+        emitter = PhaseEmitter(send_phase)
+        emitter._current = "thinking"
+        # Scale 15 simulated seconds to 15 ms while preserving watchdog ratios.
+        emitter.THINKING_TIMEOUT_S = 0.015
+        emitter.WATCHDOG_POLL_S = 0.001
+        original_activity = TURN_LIVENESS.last_activity
+        original_in_flight = TURN_LIVENESS.in_flight
+        TURN_LIVENESS.last_activity = time.monotonic()
+        TURN_LIVENESS.in_flight = 0
+        try:
+            emitter._arm_watchdog()
+            for _ in range(10):
+                await service._handle_evt_text_delta(
+                    types.SimpleNamespace(
+                        type="response.output_text.delta",
+                        response_id="watchdog-response",
+                        delta="progress",
+                    )
+                )
+                await asyncio.sleep(0.005)
+                self.assertEqual(emitter._current, "thinking")
+
+            self.assertFalse(service._recovery_active)
+            self.assertIsNotNone(service._decision_output_hold)
+            self.assertEqual(phases, [])
+            service.push_frame.assert_not_awaited()
+
+            hold = service._decision_output_hold
+            if hold is None:
+                self.fail("active held generation disappeared")
+            if hold.timeout_task is not None:
+                hold.timeout_task.cancel()
+                await asyncio.gather(
+                    hold.timeout_task,
+                    return_exceptions=True,
+                )
+            service.DECISION_OUTPUT_HOLD_TIMEOUT_S = 0.03
+            hold.timeout_task = service._track_terminal_task(
+                service._expire_decision_output_hold(hold)
+            )
+            for _ in range(1000):
+                if service._recovery_active and emitter._current == "idle":
+                    break
+                await asyncio.sleep(0.001)
+
+            self.assertEqual(phases, ["idle"])
+            self.assertTrue(service._recovery_active)
+            self.assertIsNone(service._decision_output_hold)
+            service.push_frame.assert_not_awaited()
+            self.assertTrue(
+                any(
+                    "hold timed out" in call.kwargs["error_msg"]
+                    for call in service.push_error.await_args_list
+                )
+            )
+        finally:
+            TURN_LIVENESS.last_activity = original_activity
+            TURN_LIVENESS.in_flight = original_in_flight
+            emitter._cancel_watchdog()
+            service.begin_recovery()
 
     async def test_actual_cancellation_resistant_write_retires_socket(self):
         transport = self._transport(

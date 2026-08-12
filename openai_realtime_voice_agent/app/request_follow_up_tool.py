@@ -1,5 +1,6 @@
 """Reserve one explicit Voice PE follow-up after the current reply."""
 
+import inspect
 import logging
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict
@@ -54,7 +55,7 @@ def create_request_follow_up_tool_handler(
     reserve_follow_up: Callable[[str], Awaitable[FollowUpReservationOutcome]],
     activate_follow_up: Callable[[str], bool],
     cancel_follow_up: Callable[[], None],
-    follow_up_is_safe: Callable[[str], bool] = lambda _tool_call_id: True,
+    follow_up_is_safe: Callable[[str], Any] = lambda _tool_call_id: True,
 ) -> Callable[[Any], Awaitable[None]]:
     """Create a handler that reserves, but does not send, one follow-up control."""
 
@@ -71,7 +72,10 @@ def create_request_follow_up_tool_handler(
             )
             return
 
-        if not follow_up_is_safe(params.tool_call_id):
+        safe_to_follow_up = follow_up_is_safe(params.tool_call_id)
+        if inspect.isawaitable(safe_to_follow_up):
+            safe_to_follow_up = await safe_to_follow_up
+        if safe_to_follow_up is not True:
             logger.info("Requested follow-up rejected by sole-tool safety gate")
             await params.result_callback(
                 {
@@ -172,7 +176,7 @@ def register_request_follow_up_tool(
     reserve_follow_up: Callable[[str], Awaitable[FollowUpReservationOutcome]],
     activate_follow_up: Callable[[str], bool],
     cancel_follow_up: Callable[[], None],
-    follow_up_is_safe: Callable[[str], bool] = lambda _tool_call_id: True,
+    follow_up_is_safe: Callable[[str], Any] = lambda _tool_call_id: True,
 ) -> None:
     """Register requested-follow-up dispatch on the active OpenAI service."""
     llm.register_function(

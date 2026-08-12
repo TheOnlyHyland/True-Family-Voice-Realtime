@@ -13,7 +13,9 @@ sys.path.insert(0, str(ADDON_ROOT))
 
 from app.end_conversation_tool import (  # noqa: E402
     END_CONVERSATION_TOOL_NAME,
+    SilentCloseAuthorization,
     SilentCloseResultProperties,
+    SpokenCloseVetoResultProperties,
     create_end_conversation_tool_handler,
     get_end_conversation_tool_definition,
     register_end_conversation_tool,
@@ -144,6 +146,32 @@ class EndConversationToolTests(unittest.IsolatedAsyncioTestCase):
 
         terminal.assert_awaited_once_with("terminal-close-call")
         close_silently.assert_awaited_once_with()
+
+    async def test_semantic_veto_requests_one_spoken_tool_free_response(self):
+        close_silently = AsyncMock()
+        callback = AsyncMock()
+        handler = create_end_conversation_tool_handler(
+            close_silently,
+            close_is_safe=AsyncMock(
+                return_value=SilentCloseAuthorization.SPOKEN_RESPONSE_REQUIRED
+            ),
+        )
+
+        await handler(
+            SimpleNamespace(
+                arguments={},
+                tool_call_id="vetoed-close-call",
+                result_callback=callback,
+            )
+        )
+
+        close_silently.assert_not_awaited()
+        result = cast(Any, callback.await_args).args[0]
+        self.assertEqual(result["status"], "spoken_response_required")
+        self.assertIn("one brief natural spoken response", result["instruction"])
+        properties = cast(Any, callback.await_args).kwargs["properties"]
+        self.assertIsInstance(properties, SpokenCloseVetoResultProperties)
+        self.assertTrue(properties.run_llm)
 
     async def test_non_object_arguments_do_not_close(self):
         close_silently = AsyncMock()

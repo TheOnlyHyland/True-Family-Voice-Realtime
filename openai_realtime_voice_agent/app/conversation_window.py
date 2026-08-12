@@ -122,6 +122,27 @@ class ConversationWindow:
         if item_type == "function_call" and call_id:
             self.call_turn_ids[call_id] = turn.user_item_id
 
+    def discard_active_assistant_item(
+        self,
+        user_item_id: str,
+        item_id: str,
+    ) -> bool:
+        """Remove one exact generated assistant item from the active turn."""
+        if self.active_turn_id != user_item_id:
+            return False
+        turn = self._turn(user_item_id)
+        if turn is None:
+            return False
+        matches = [item for item in turn.items if item.get("id") == item_id]
+        if (
+            len(matches) != 1
+            or matches[0].get("type") != "message"
+            or matches[0].get("role") != "assistant"
+        ):
+            return False
+        turn.items = [item for item in turn.items if item.get("id") != item_id]
+        return True
+
     def attach_transcript(self, item_id: str, transcript: str) -> bool:
         turn = self._turn(item_id)
         if turn:
@@ -182,6 +203,130 @@ class ConversationWindow:
             self.active_turn_id = None
             return True
         return False
+
+    def response_release_error(
+        self,
+        user_item_id: str,
+        status: str,
+        output: list[dict[str, Any]],
+        *,
+        turn_ended: bool,
+        continuation_pending: bool,
+        continuable_call_ids: set[str],
+    ) -> Optional[str]:
+        """Return why a completed response is unsafe to expose physically."""
+        turn = self._turn(user_item_id)
+        if turn is None:
+            return "response lost its active conversation turn"
+        if status != "completed":
+            return f"response status {status!r} is not completed"
+        if not turn.transcript:
+            return "response turn has no retained user transcript"
+
+        item_ids: list[str] = []
+        assistant_items = []
+        response_calls: list[str] = []
+        for item in output:
+            item_id = item.get("id")
+            if not isinstance(item_id, str) or not item_id:
+                return "response output contains an item without an exact ID"
+            item_ids.append(item_id)
+            item_type = item.get("type")
+            if item_type == "message":
+                if (
+                    item.get("role") != "assistant"
+                    or not isinstance(item.get("content"), list)
+                    or not _text_content(item)
+                ):
+                    return "response contains invalid assistant output"
+                assistant_items.append(item)
+                continue
+            if item_type == "function_call":
+                call_id = item.get("call_id")
+                if (
+                    not isinstance(call_id, str)
+                    or not call_id
+                    or not isinstance(item.get("name"), str)
+                    or not item.get("name")
+                    or not isinstance(item.get("arguments"), str)
+                ):
+                    return "response contains an invalid tool call"
+                response_calls.append(call_id)
+                continue
+            return f"response contains unsupported output type {item_type!r}"
+        if len(item_ids) != len(set(item_ids)):
+            return "response contains duplicate output item IDs"
+        if len(response_calls) != len(set(response_calls)):
+            return "response contains duplicate tool call IDs"
+
+        calls = [
+            item.get("call_id")
+            for item in turn.items
+            if item.get("type") == "function_call"
+        ]
+        results = [
+            item.get("call_id")
+            for item in turn.items
+            if item.get("type") == "function_call_output"
+        ]
+        if (
+            None in calls
+            or None in results
+            or len(calls) != len(set(calls))
+            or len(results) != len(set(results))
+            or not set(results) <= set(calls)
+        ):
+            return "conversation contains an invalid tool transaction"
+        unresolved_calls = set(calls) - set(results)
+
+        if response_calls:
+            if turn_ended:
+                return "tool-call response ended its turn before tool completion"
+            if not set(response_calls) <= (continuable_call_ids | set(results)):
+                return "response tool call has no current execution owner"
+            if not unresolved_calls <= continuable_call_ids:
+                return "conversation has an unowned unresolved tool call"
+            return None
+
+        if continuation_pending or unresolved_calls:
+            return "terminal response has unresolved tool work"
+        if not turn_ended or not turn.complete or not turn.replayable:
+            return "terminal response is not structurally replayable"
+        if len(assistant_items) != 1:
+            return "terminal response requires exactly one assistant output"
+        return None
+
+    def discard_response_output(
+        self,
+        user_item_id: str,
+        output: list[dict[str, Any]],
+    ) -> bool:
+        """Roll back one unheard response before rebuilding the session."""
+        turn = self._turn(user_item_id)
+        if turn is None:
+            return False
+        output_ids = {
+            item.get("id")
+            for item in output
+            if isinstance(item.get("id"), str) and item.get("id")
+        }
+        removed_call_ids = {
+            str(item["call_id"])
+            for item in output
+            if item.get("type") == "function_call"
+            and item.get("call_id")
+        }
+        turn.items = [
+            item
+            for item in turn.items
+            if item.get("id") not in output_ids and item not in output
+        ]
+        for call_id in removed_call_ids:
+            self.call_turn_ids.pop(call_id, None)
+        turn.complete = False
+        turn.terminal_assistant = False
+        self.active_turn_id = user_item_id
+        return True
 
     def finish_silent_control(self, call_id: str, function_name: str) -> bool:
         """Finish a turn whose terminal model decision is a silent control."""

@@ -1,16 +1,16 @@
 {
-  "backend_version": "0.22.4",
+  "backend_version": "0.22.5",
   "legacy_backend_version": "0.20.6",
   "firmware_release_binding": {
     "status": "finalized",
-    "version": "0.20.0",
+    "version": "0.20.1",
     "repository": "TheOnlyHyland/True-Family-Voice-Firmware",
-    "source_commit": "36abf4ba861e2ca30968882311ed3b2562b47367",
-    "manifest_sha256": "09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f",
-    "factory_sha256": "8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65",
-    "ota_sha256": "a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38",
-    "elf_sha256": "9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88",
-    "sha256sums_sha256": "280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3"
+    "source_commit": "13ad7efe2df75f846f8fb48a939934db75efb5fd",
+    "manifest_sha256": "00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c",
+    "factory_sha256": "2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b",
+    "ota_sha256": "7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af",
+    "elf_sha256": "1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc",
+    "sha256sums_sha256": "05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2"
   },
   "transport_security": "unauthenticated_plaintext_trusted_lan_only",
   "audio": {
@@ -85,17 +85,14 @@
     "ack": ["type", "session_nonce", "wake_generation"],
     "phase": ["type", "value", "session_nonce", "wake_generation"],
     "follow_up_progress_phase": ["type", "value", "token", "session_nonce", "wake_generation"],
-    "prepare_suppress_followup": ["type", "token"],
-    "commit_suppress_followup": ["type", "token"],
-    "cancel_suppress_followup": ["type", "token"]
+    "prepare_suppress_followup": ["type", "token", "session_nonce", "wake_generation"],
+    "commit_suppress_followup": ["type", "token", "session_nonce", "wake_generation"],
+    "cancel_suppress_followup": ["type", "token", "session_nonce", "wake_generation"]
   },
   "legacy_backend_to_device_fields": {
     "hello": ["type", "audio_out", "follow_up_ms", "follow_up_open_delay_ms", "wake_open_delay_ms", "playback_prebuffer_ms"],
     "ack": ["type"],
-    "phase": ["type", "value"],
-    "prepare_suppress_followup": ["type", "token"],
-    "commit_suppress_followup": ["type", "token"],
-    "cancel_suppress_followup": ["type", "token"]
+    "phase": ["type", "value"]
   },
   "trusted_device_to_backend_fields": {
     "hello_ack": ["type", "nonce", "accepted", "audio_out", "follow_up_ms", "follow_up_open_delay_ms", "wake_open_delay_ms", "playback_prebuffer_ms"],
@@ -112,7 +109,6 @@
     "client_revoke": ["type", "session_nonce", "wake_generation", "reason"]
   },
   "legacy_device_to_backend_fields": {
-    "suppress_followup_ack": ["type", "stage", "token", "accepted"],
     "wake": ["type"],
     "flush": ["type"],
     "button_cancel": ["type"],
