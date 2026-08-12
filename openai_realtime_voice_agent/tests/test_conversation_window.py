@@ -219,6 +219,43 @@ class ConversationWindowTests(unittest.TestCase):
         self.assertIsNone(window.active_turn_id)
         self.assertFalse(window.turns[0].replayable)
 
+    def test_empty_terminal_output_is_not_safe_for_physical_release(self):
+        window = ConversationWindow(max_turns=12)
+        window.begin_user_turn(message("user-1", "user"))
+        window.attach_transcript("user-1", "hello")
+        window.activate("user-1")
+
+        ended = window.finish_response("completed", [])
+
+        self.assertEqual(
+            window.response_release_error(
+                "user-1",
+                "completed",
+                [],
+                turn_ended=ended,
+                continuation_pending=False,
+                continuable_call_ids=set(),
+            ),
+            "terminal response is not structurally replayable",
+        )
+
+    def test_failed_release_rolls_back_unheard_output_and_reopens_turn(self):
+        window = ConversationWindow(max_turns=12)
+        window.begin_user_turn(message("user-1", "user"))
+        window.attach_transcript("user-1", "hello")
+        window.activate("user-1")
+        assistant = message("assistant-1", "assistant", "Unheard")
+        self.assertTrue(window.finish_response("completed", [assistant]))
+
+        self.assertTrue(window.discard_response_output("user-1", [assistant]))
+
+        self.assertEqual(window.active_turn_id, "user-1")
+        self.assertFalse(window.turns[0].replayable)
+        self.assertNotIn(
+            "assistant-1",
+            [item.get("id") for item in window.turns[0].items],
+        )
+
     def test_silent_control_is_terminal_without_synthetic_assistant_speech(self):
         window = ConversationWindow(max_turns=12)
         window.begin_user_turn(message("user-1", "user"))
@@ -440,6 +477,60 @@ class ConversationWindowTests(unittest.TestCase):
             )
         )
         self.assertEqual(window.active_turn_id, "user-1")
+
+    def test_exact_active_assistant_item_can_be_discarded_before_replay(self):
+        window = ConversationWindow(max_turns=12)
+        window.begin_user_turn(message("user-1", "user"))
+        window.attach_transcript("user-1", "answer")
+        window.activate("user-1")
+        assistant = message("assistant-1", "assistant", "premature question")
+        window.observe_item(assistant)
+        window.observe_item(
+            {
+                "id": "request-item",
+                "type": "function_call",
+                "call_id": "request-call",
+                "name": "request_follow_up",
+                "arguments": '{"purpose":"conversational_turn"}',
+            }
+        )
+
+        self.assertTrue(
+            window.discard_active_assistant_item("user-1", "assistant-1")
+        )
+        self.assertEqual(
+            [item["id"] for item in window.turns[0].items],
+            ["user-1", "request-item"],
+        )
+        self.assertFalse(
+            window.discard_active_assistant_item("user-1", "assistant-1")
+        )
+        self.assertFalse(
+            window.discard_active_assistant_item("other-user", "request-item")
+        )
+        window.observe_item(
+            {
+                "id": "request-result",
+                "type": "function_call_output",
+                "call_id": "request-call",
+                "output": '{"status":"follow_up_reserved"}',
+            }
+        )
+        self.assertTrue(
+            window.finish_response(
+                "completed",
+                [message("question-2", "assistant", "Which cuisine?")],
+            )
+        )
+        replay_ids = [
+            item["id"]
+            for item in window.replay_snapshot()[0].items
+        ]
+        self.assertNotIn("assistant-1", replay_ids)
+        self.assertEqual(
+            replay_ids,
+            ["user-1", "request-item", "request-result", "question-2"],
+        )
 
 
 if __name__ == "__main__":

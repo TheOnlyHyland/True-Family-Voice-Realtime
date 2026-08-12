@@ -28,9 +28,24 @@ TRUSTED_BACKEND_TO_DEVICE_FIELDS = {
         "session_nonce",
         "wake_generation",
     ),
-    "prepare_suppress_followup": ("type", "token"),
-    "commit_suppress_followup": ("type", "token"),
-    "cancel_suppress_followup": ("type", "token"),
+    "prepare_suppress_followup": (
+        "type",
+        "token",
+        "session_nonce",
+        "wake_generation",
+    ),
+    "commit_suppress_followup": (
+        "type",
+        "token",
+        "session_nonce",
+        "wake_generation",
+    ),
+    "cancel_suppress_followup": (
+        "type",
+        "token",
+        "session_nonce",
+        "wake_generation",
+    ),
 }
 
 LEGACY_BACKEND_TO_DEVICE_FIELDS = {
@@ -44,9 +59,6 @@ LEGACY_BACKEND_TO_DEVICE_FIELDS = {
     ),
     "ack": ("type",),
     "phase": ("type", "value"),
-    "prepare_suppress_followup": ("type", "token"),
-    "commit_suppress_followup": ("type", "token"),
-    "cancel_suppress_followup": ("type", "token"),
 }
 
 TRUSTED_DEVICE_TO_BACKEND_FIELDS = {
@@ -93,7 +105,6 @@ TRUSTED_DEVICE_TO_BACKEND_FIELDS = {
 }
 
 LEGACY_DEVICE_TO_BACKEND_FIELDS = {
-    "suppress_followup_ack": ("type", "stage", "token", "accepted"),
     "wake": ("type",),
     "flush": ("type",),
     "button_cancel": ("type",),

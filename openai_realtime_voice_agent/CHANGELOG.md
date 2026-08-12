@@ -2,6 +2,45 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.5
+
+- Finalized the backend binding to public firmware `0.20.1` from
+  `TheOnlyHyland/True-Family-Voice-Firmware` source commit
+  `13ad7efe2df75f846f8fb48a939934db75efb5fd`. Publication and release CI now
+  require that exact source and verify the immutable manifest, factory, OTA,
+  ELF, and `SHA256SUMS` assets against their finalized SHA-256 values.
+- Strengthened assistant-output isolation so response text, transcript, PCM,
+  Pipecat source/chunker work, queued chunks, partial buffers, and active writes
+  remain bound to one response generation and physical socket. Output cannot
+  cross recovery, replacement, interrupt, timeout, or ownership boundaries.
+- Added fail-closed structural normalization for conversation-control responses.
+  An otherwise exact `request_follow_up` or `end_conversation` call may proceed
+  only after any co-generated unheard assistant item is deleted remotely,
+  removed from local history, and projected with its exact in-progress tool
+  placeholder. Mixed, ambiguous, incomplete, or unconfirmed structures recover
+  without dispatching the control.
+- Made follow-up-question and spoken-close continuations explicit no-tools
+  responses using an empty tool set and `tool_choice: none`. Any function call
+  emitted in those modes is quarantined before dispatch and forces recovery.
+- Moved follow-up question authorization to release time. Every held output
+  release revalidates the exact response ID, response generation, reservation
+  epoch, token, socket, session, wake, and physical deadline; stale release
+  callbacks and TTFB paths cannot revive an expired reservation.
+- Tightened recovery fences by synchronously revoking physical output authority,
+  invalidating release capabilities, settling terminal and continuation waiters,
+  rolling back unreleasable response output, and preventing a recovery-raced
+  transport bind from restoring an old grant.
+- Added a semantic silent-close veto for high-confidence gratitude, completion,
+  decision, and cancellation answers. Those answers receive one brief natural
+  no-tools acknowledgement; unrelated answers may still use the exact sole-tool
+  silent close path.
+- Made graceful close context-bound to one immutable `(websocket, session_nonce,
+  wake_generation, token)` across PREPARE, COMMIT, ACK, and CANCEL. Exact
+  rejections clear only their own transaction, a valid newer wake locally burns
+  old ownership without sending stale control, and terminal idle is delivered
+  only to the still-current local wake. Silent-close failure retires a socket
+  only while that exact socket, session, and wake remain current.
+
 ## 0.22.4
 
 - Bound fresh OpenAI speech directly to an exact OPEN follow-up transaction even

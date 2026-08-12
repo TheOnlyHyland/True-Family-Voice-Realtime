@@ -7,6 +7,7 @@ on:
       - master
     paths:
       - "openai_realtime_voice_agent/**"
+      - ".github/scripts/release_integrity.py"
       - ".github/workflows/build-addon.yml"
   pull_request:
     branches:
@@ -14,6 +15,7 @@ on:
       - master
     paths:
       - "openai_realtime_voice_agent/**"
+      - ".github/scripts/release_integrity.py"
       - ".github/workflows/build-addon.yml"
   release:
     types:
@@ -26,7 +28,7 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: "Required when publish=true, for example v0.22.4"
+        description: "Required when publish=true, for example v0.22.5"
         required: false
         type: string
       source_commit:
@@ -34,28 +36,30 @@ on:
         required: false
         type: string
       pilot_firmware_source_only:
-        description: "Historical pilot switch; rejected when publishing 0.22.4"
+        description: "Historical pilot switch; rejected when publishing 0.22.5"
         required: true
         default: false
         type: boolean
 
 concurrency:
-  group: addon-${{ github.event.release.tag_name || github.ref }}
+  group: addon-${{ (github.event_name == 'release' && github.event.release.tag_name) || (github.event_name == 'workflow_dispatch' && inputs.publish && inputs.release_tag) || github.ref }}
   cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: theonlyhyland/true-family-voice-realtime/openai-realtime-voice-agent
-  ADDON_VERSION: 0.22.4
+  ADDON_VERSION: 0.22.5
   FIRMWARE_RELEASE_BINDING: finalized
-  FIRMWARE_RELEASE_VERSION: 0.20.0
-  FIRMWARE_RELEASE_SOURCE_COMMIT: 36abf4ba861e2ca30968882311ed3b2562b47367
+  FIRMWARE_RELEASE_VERSION: 0.20.1
+  FIRMWARE_RELEASE_SOURCE_COMMIT: 13ad7efe2df75f846f8fb48a939934db75efb5fd
   FIRMWARE_RELEASE_REPOSITORY: TheOnlyHyland/True-Family-Voice-Firmware
-  FIRMWARE_RELEASE_MANIFEST_SHA256: 09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f
-  FIRMWARE_RELEASE_FACTORY_SHA256: 8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65
-  FIRMWARE_RELEASE_OTA_SHA256: a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38
-  FIRMWARE_RELEASE_ELF_SHA256: 9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88
-  FIRMWARE_RELEASE_SHA256SUMS_SHA256: 280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3
+  FIRMWARE_RELEASE_MANIFEST_SHA256: 00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c
+  FIRMWARE_RELEASE_FACTORY_SHA256: 2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b
+  FIRMWARE_RELEASE_OTA_SHA256: 7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af
+  FIRMWARE_RELEASE_ELF_SHA256: 1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc
+  FIRMWARE_RELEASE_SHA256SUMS_SHA256: 05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2
+  RELEASE_EVIDENCE_ARTIFACT: true-family-voice-backend-0.22.5-release-evidence-${{ github.sha }}
+  RELEASE_EVIDENCE_FILE: true-family-voice-backend-0.22.5-release-evidence.json
   POETRY_LOCK_SHA256: 13193c62fc95a0c05c7b6e89efe7db060b4f00438db46c83dc43a23eb1d9af15
   TITANET_MODEL_SHA256: d51abcf31717ef28162f26acb9d44dd4127c3d44c9b8624f699f3425daca8e77
   TITANET_MODEL_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_large.onnx
@@ -82,21 +86,21 @@ jobs:
         run: |
           set -euo pipefail
           test "$FIRMWARE_RELEASE_BINDING" = "finalized"
-          test "$FIRMWARE_RELEASE_VERSION" = "0.20.0"
+          test "$FIRMWARE_RELEASE_VERSION" = "0.20.1"
           test "$FIRMWARE_RELEASE_REPOSITORY" = \
             "TheOnlyHyland/True-Family-Voice-Firmware"
           test "$FIRMWARE_RELEASE_SOURCE_COMMIT" = \
-            "36abf4ba861e2ca30968882311ed3b2562b47367"
+            "13ad7efe2df75f846f8fb48a939934db75efb5fd"
           test "$FIRMWARE_RELEASE_MANIFEST_SHA256" = \
-            "09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f"
+            "00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c"
           test "$FIRMWARE_RELEASE_FACTORY_SHA256" = \
-            "8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65"
+            "2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b"
           test "$FIRMWARE_RELEASE_OTA_SHA256" = \
-            "a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38"
+            "7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af"
           test "$FIRMWARE_RELEASE_ELF_SHA256" = \
-            "9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88"
+            "1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc"
           test "$FIRMWARE_RELEASE_SHA256SUMS_SHA256" = \
-            "280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3"
+            "05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2"
           [[ "$FIRMWARE_RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$FIRMWARE_RELEASE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           for DIGEST in \
@@ -337,6 +341,11 @@ jobs:
       packages: write
 
     steps:
+      - name: Checkout exact candidate source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
       - name: Validate protected publication request
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -392,14 +401,13 @@ jobs:
           for ARCH in aarch64 amd64; do
             IMAGE="$REGISTRY/$IMAGE_NAME-$ARCH"
             for TAG in "$ADDON_VERSION" "sha-$GITHUB_SHA"; do
-              if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
-                echo "Refusing to overwrite existing immutable tag $IMAGE:$TAG" >&2
-                exit 1
-              fi
+              python3 .github/scripts/release_integrity.py \
+                require-manifest-absent "$IMAGE:$TAG"
             done
           done
 
       - name: Publish the unchanged gated images
+        id: publish-images
         run: |
           set -euo pipefail
           ARTIFACT_ROOT="$RUNNER_TEMP/built-images"
@@ -419,10 +427,55 @@ jobs:
             VERSION_DIGEST=$(docker manifest inspect --verbose "$VERSION_REF" | jq -er '.Descriptor.digest')
             SOURCE_DIGEST=$(docker manifest inspect --verbose "$SOURCE_REF" | jq -er '.Descriptor.digest')
             test "$VERSION_DIGEST" = "$SOURCE_DIGEST"
+            [[ "$VERSION_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            if [[ "$ARCH" == "aarch64" ]]; then
+              AARCH64_DIGEST="$VERSION_DIGEST"
+            else
+              AMD64_DIGEST="$VERSION_DIGEST"
+            fi
             echo "Published unchanged gated image: $VERSION_REF"
             echo "Published source identity: $SOURCE_REF"
             echo "Published digest: $VERSION_DIGEST"
           done
+          test -n "${AARCH64_DIGEST:-}"
+          test -n "${AMD64_DIGEST:-}"
+          echo "aarch64_digest=$AARCH64_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "amd64_digest=$AMD64_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Build machine-readable backend release evidence
+        env:
+          AARCH64_DIGEST: ${{ steps.publish-images.outputs.aarch64_digest }}
+          AMD64_DIGEST: ${{ steps.publish-images.outputs.amd64_digest }}
+        run: |
+          set -euo pipefail
+          EVIDENCE_ROOT="$RUNNER_TEMP/backend-release-evidence"
+          mkdir -p "$EVIDENCE_ROOT"
+          python3 .github/scripts/release_integrity.py write-evidence \
+            --output "$EVIDENCE_ROOT/$RELEASE_EVIDENCE_FILE" \
+            --version "$ADDON_VERSION" \
+            --source-commit "$GITHUB_SHA" \
+            --registry "$REGISTRY" \
+            --image-name "$IMAGE_NAME" \
+            --aarch64-digest "$AARCH64_DIGEST" \
+            --amd64-digest "$AMD64_DIGEST"
+
+      - name: Validate backend release evidence before upload
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_integrity.py validate-evidence \
+            --file "$RUNNER_TEMP/backend-release-evidence/$RELEASE_EVIDENCE_FILE" \
+            --version "$ADDON_VERSION" \
+            --source-commit "$GITHUB_SHA" \
+            --registry "$REGISTRY" \
+            --image-name "$IMAGE_NAME"
+
+      - name: Upload immutable backend release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ env.RELEASE_EVIDENCE_ARTIFACT }}
+          path: ${{ runner.temp }}/backend-release-evidence/${{ env.RELEASE_EVIDENCE_FILE }}
+          if-no-files-found: error
+          retention-days: 90
 
   release-verify:
     name: Verify release uses pre-published immutable images
@@ -430,10 +483,73 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       packages: read
 
     steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Locate exact successful publication evidence
+        id: locate-evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_PAGES="$RUNNER_TEMP/backend-release-artifacts.json"
+          RUN_RECORD="$RUNNER_TEMP/backend-publication-run.json"
+          gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/$GITHUB_REPOSITORY/actions/artifacts?name=$RELEASE_EVIDENCE_ARTIFACT&per_page=100" \
+            | jq -s '.' > "$ARTIFACT_PAGES"
+          SELECTION=$(python3 .github/scripts/release_integrity.py \
+            select-artifact \
+            --pages "$ARTIFACT_PAGES" \
+            --name "$RELEASE_EVIDENCE_ARTIFACT" \
+            --source-commit "$GITHUB_SHA")
+          ARTIFACT_ID=$(jq -er '.artifact_id' <<< "$SELECTION")
+          RUN_ID=$(jq -er '.run_id' <<< "$SELECTION")
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" \
+            > "$RUN_RECORD"
+          python3 .github/scripts/release_integrity.py \
+            validate-publication-run \
+            --file "$RUN_RECORD" \
+            --run-id "$RUN_ID" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --workflow-path ".github/workflows/build-addon.yml"
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download exact publication evidence by artifact and run ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ steps.locate-evidence.outputs.artifact_id }}
+          run-id: ${{ steps.locate-evidence.outputs.run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: ${{ runner.temp }}/backend-release-evidence
+          merge-multiple: true
+
+      - name: Validate exact publication evidence
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_integrity.py validate-evidence \
+            --file "$RUNNER_TEMP/backend-release-evidence/$RELEASE_EVIDENCE_FILE" \
+            --version "$ADDON_VERSION" \
+            --source-commit "$GITHUB_SHA" \
+            --registry "$REGISTRY" \
+            --image-name "$IMAGE_NAME"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
@@ -448,12 +564,13 @@ jobs:
           set -euo pipefail
           test "$FIRMWARE_RELEASE_BINDING" = "finalized"
           test "$RELEASE_TAG" = "v$ADDON_VERSION"
+          EVIDENCE_FILE="$RUNNER_TEMP/backend-release-evidence/$RELEASE_EVIDENCE_FILE"
           for ARCH in aarch64 amd64; do
-            IMAGE="$REGISTRY/$IMAGE_NAME-$ARCH"
-            VERSION_MANIFEST=$(docker manifest inspect "$IMAGE:$ADDON_VERSION")
-            SOURCE_MANIFEST=$(docker manifest inspect "$IMAGE:sha-$GITHUB_SHA")
-            test "$VERSION_MANIFEST" = "$SOURCE_MANIFEST"
-            VERSION_DIGEST=$(docker manifest inspect --verbose "$IMAGE:$ADDON_VERSION" | jq -er '.Descriptor.digest')
-            SOURCE_DIGEST=$(docker manifest inspect --verbose "$IMAGE:sha-$GITHUB_SHA" | jq -er '.Descriptor.digest')
-            test "$VERSION_DIGEST" = "$SOURCE_DIGEST"
+            VERSION_REF=$(jq -er --arg arch "$ARCH" '.images[$arch].version_ref' "$EVIDENCE_FILE")
+            SOURCE_REF=$(jq -er --arg arch "$ARCH" '.images[$arch].source_ref' "$EVIDENCE_FILE")
+            RECORDED_DIGEST=$(jq -er --arg arch "$ARCH" '.images[$arch].manifest_digest' "$EVIDENCE_FILE")
+            VERSION_DIGEST=$(docker manifest inspect --verbose "$VERSION_REF" | jq -er '.Descriptor.digest')
+            SOURCE_DIGEST=$(docker manifest inspect --verbose "$SOURCE_REF" | jq -er '.Descriptor.digest')
+            test "$VERSION_DIGEST" = "$RECORDED_DIGEST"
+            test "$SOURCE_DIGEST" = "$RECORDED_DIGEST"
           done

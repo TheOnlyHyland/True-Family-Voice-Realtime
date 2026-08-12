@@ -54,6 +54,8 @@ Longer versions, with the how-it-works behind each: **[Stories](docs/stories.md)
 - **Read-only calendar lookups** — bounded event reads from approved Home Assistant calendars; no event writes
 - **Authoritative room-light ON control** — fixed per-room sequences keep mixed Zigbee groups coherent
 - **Safe serial follow-ups** — one model-requested question at a time, rearmed only after each genuine answer, with no round-count limit inside the existing 120-second physical wake and a required fail-closed nearby-media scope
+- **Reservation-bound question output** — each no-tools follow-up question stays held until terminal structure is valid and its exact response, reservation, socket, session, and wake still own release
+- **Natural terminal handling** — unrelated answers may close silently, while clear gratitude, completion, decision, or cancellation receives one brief spoken acknowledgement without exposing tools
 - **Unclipped tool continuations** — response-generation audio drains through Pipecat and the physical WebSocket before a tool follow-up response can begin
 - **HA sensors** — current speaker, active timers, wakes today, false wakes today, and available voice prints
 - **Persona fully yours** — rewrite the instructions; ten OpenAI voices to build on
@@ -86,12 +88,18 @@ drains, the follow-up decision finalizes, and only then may response B be create
 Stop, replacement, recovery, timeout, or write failure discards A instead of
 letting old PCM cross an ownership boundary.
 
+Managed output is structurally validated before release. Exact conversation
+controls can normalize one unheard co-generated assistant item only after remote
+deletion and local-history read-back; ambiguous structures fail closed. Follow-up
+questions and semantic close acknowledgements are explicit no-tools responses,
+and any attempted function call in those modes is quarantined before dispatch.
+
 ## Quick start
 
-> **The backend 0.22.4 firmware binding is finalized to exact firmware 0.20.0.**
+> **The backend 0.22.5 firmware binding is finalized to exact firmware 0.20.1.**
 > Update and verify firmware first, then install only the protected published
 > backend image. Until that image and GitHub release exist, keep using released
-> backend 0.21.1; firmware 0.20.0 then keeps ordinary wakes available while
+> backend 0.21.1; firmware 0.20.1 then keeps ordinary wakes available while
 > explicit follow-up fails closed. A source checkout is not deployable. See
 > [Release Safety](RELEASE.md) for the immutable source and artifact binding.
 
@@ -100,7 +108,7 @@ letting old PCM cross an ownership boundary.
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime` → install
    **True Family Voice Realtime** and set your OpenAI API key.
 2. **Give it your home**: add Home Assistant's **MCP Server** integration, expose the entities you want voice-controlled to Assist, and populate `mcp_tool_allowlist` with every exact desired tool name. Empty exposes no MCP tools.
-3. **Flash the firmware**: before backend 0.22.4, adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.20.0 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.0/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
+3. **Flash the firmware**: before backend 0.22.5, adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.20.1 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.1/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
 4. **Before startup**, set `nearby_media_power_entity` to `switch.living_room_tv_smart_switch` and `nearby_media_players` to `media_player.living_room_tv,media_player.living_room_tv_audio` for this home.
 5. **Start the protected published backend only after the firmware update succeeds**, then say
    **"Hey Leonard"** and ask for a light.

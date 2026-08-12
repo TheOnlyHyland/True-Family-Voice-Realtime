@@ -25,23 +25,23 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "rapid_pilot_proto
 CONTRACT = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 FINAL_FIRMWARE_RELEASE = {
     "status": "finalized",
-    "version": "0.20.0",
+    "version": "0.20.1",
     "repository": "TheOnlyHyland/True-Family-Voice-Firmware",
-    "source_commit": "36abf4ba861e2ca30968882311ed3b2562b47367",
+    "source_commit": "13ad7efe2df75f846f8fb48a939934db75efb5fd",
     "manifest_sha256": (
-        "09fa1bb26d032fccc496834171ebc314abbf5e08da2d68d8801210db0b006e9f"
+        "00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c"
     ),
     "factory_sha256": (
-        "8a35ceb28bb939707869edfa9fc32b4fedda3c14bb5a8b7b5dc80f5340a9ad65"
+        "2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b"
     ),
     "ota_sha256": (
-        "a5ed1f17def9c008ac86992293f808b9b0ee5ff9e32c0a8d76e014219c735d38"
+        "7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af"
     ),
     "elf_sha256": (
-        "9ca821815f68e1b25207c6a9d93081a72cf76c51b38f1a5ad0178e77136b7b88"
+        "1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc"
     ),
     "sha256sums_sha256": (
-        "280816f68552f2eaa6785891e98876db2729d311c860a4982464c2ca846b71b3"
+        "05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2"
     ),
 }
 
@@ -83,8 +83,8 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             (ADDON_ROOT / "poetry.lock").read_bytes()
         ).hexdigest()
 
-        self.assertEqual(repository["addons"][0]["version"], "0.22.4")
-        self.assertEqual(pyproject["tool"]["poetry"]["version"], "0.22.4")
+        self.assertEqual(repository["addons"][0]["version"], "0.22.5")
+        self.assertEqual(pyproject["tool"]["poetry"]["version"], "0.22.5")
         locked_versions = {
             package["name"]: package["version"]
             for package in lock["package"]
@@ -96,7 +96,7 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             lock_digest,
             "13193c62fc95a0c05c7b6e89efe7db060b4f00438db46c83dc43a23eb1d9af15",
         )
-        self.assertIn('version: "0.22.4"', config)
+        self.assertIn('version: "0.22.5"', config)
         self.assertIn('follow_up_listen_seconds: 0', config)
         self.assertIn("needs: test", workflow)
         self.assertIn('"poetry==$POETRY_VERSION"', workflow)
@@ -199,13 +199,14 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         self.assertNotIn("pip3 install /tmp/app_build", dockerfile)
 
     def test_vendored_contract_is_bounded_and_explicitly_lan_only(self):
-        self.assertEqual(CONTRACT["backend_version"], "0.22.4")
+        self.assertEqual(CONTRACT["backend_version"], "0.22.5")
         self.assertEqual(
             CONTRACT["firmware_release_binding"],
             FINAL_FIRMWARE_RELEASE,
         )
         self.assertNotIn("regression_firmware_version", CONTRACT)
         self.assertNotIn("regression_firmware_release", CONTRACT)
+        self.assertNotIn("pending_firmware_contract_version", CONTRACT)
         self.assertEqual(CONTRACT["max_control_message_bytes"], 2048)
         self.assertEqual(CONTRACT["max_protocol_id"], 0x7FFFFFFF)
         self.assertEqual(
@@ -399,14 +400,13 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             encoding="utf-8"
         ).strip()
         expected_version = CONTRACT["firmware_release_binding"]["version"]
-        if actual_version != expected_version and not REQUIRE_EXTERNAL_FIRMWARE_SOURCE:
-            self.skipTest(
-                "optional sibling firmware checkout does not match the release binding"
-            )
-        self.assertEqual(
-            actual_version,
-            expected_version,
-        )
+        if actual_version != expected_version:
+            if not REQUIRE_EXTERNAL_FIRMWARE_SOURCE:
+                self.skipTest(
+                    "optional sibling firmware checkout does not match the release binding"
+                )
+            else:
+                self.assertEqual(actual_version, expected_version)
         cpp = (COMPONENT_ROOT / "va_client.cpp").read_text(encoding="utf-8")
         lifecycle = (COMPONENT_ROOT / "follow_up_lifecycle.h").read_text(
             encoding="utf-8"

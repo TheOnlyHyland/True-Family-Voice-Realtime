@@ -1,5 +1,5 @@
 name: True Family Voice Realtime
-version: "0.22.4"
+version: "0.22.5"
 slug: openai_realtime_voice_agent
 description: Talk to your home with OpenAI gpt-realtime-2.1 - a voice agent for the Home Assistant Voice PE, with live device control and web search.
 url: https://github.com/TheOnlyHyland/True-Family-Voice-Realtime
@@ -27,14 +27,14 @@ map:
 # User-facing help lives in translations/, not here — keep comments dev-facing.
 #
 # REMOVED options (v0.4.29) — hardcoded to the only supported value:
-  #   semantic_vad_create_response → false (0.22.4 owns response.create behind
+  #   semantic_vad_create_response → false (0.22.5 owns response.create behind
 #     its bounded-context barrier)
 #   enable_disconnect_tool → false  (model could hang up mid-conversation)
 #   interrupt_response → false  (handsfree barge-in shelved: the speaker→mic
 #     echo leak made the VAD cut replies / squeal; firmware is barge_in:false)
 #   device_input_sample_rate → 16000  (the Voice PE firmware always sends 16k)
 # Legacy server_vad fields are retained only so saved configurations reach the
-  # explicit 0.22.4 startup error. They are optional-without-default and hidden
+  # explicit 0.22.5 startup error. They are optional-without-default and hidden
 # behind "Show unused optional configuration options". The same trick (v0.4.30) for
 # the four *_custom escape-hatch fields: optional, no default, hidden until
 # needed (the dropdown descriptions tell users how to reveal them).
@@ -146,7 +146,7 @@ options:
   max_context_messages: 12
   transcription_model: "gpt-4o-transcribe"
   # Legacy turn_detection_type + vad_* keys remain optional so an existing
-  # saved configuration reaches the app's explicit 0.22.4 startup error.
+  # saved configuration reaches the app's explicit 0.22.5 startup error.
   # Fresh installs keep them absent; semantic_vad is mandatory.
 
   # --- 🔍 Debug ---
@@ -200,7 +200,7 @@ schema:
   transcription_model: "list(gpt-4o-transcribe|gpt-realtime-whisper|gpt-4o-mini-transcribe|whisper-1|custom)"
   transcription_model_custom: str?
   # Legacy server_vad fields are retained only for saved-config diagnostics.
-  # Selecting server_vad is rejected by 0.22.4 startup validation.
+  # Selecting server_vad is rejected by 0.22.5 startup validation.
   turn_detection_type: "list(semantic_vad|server_vad)?"
   vad_threshold: "float(0,1)?"
   vad_prefix_padding_ms: int?

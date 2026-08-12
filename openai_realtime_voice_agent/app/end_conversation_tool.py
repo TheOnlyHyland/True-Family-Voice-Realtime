@@ -1,8 +1,9 @@
 """Silently close an unrelated answer in a reopened Voice PE turn."""
 
-import logging
 import inspect
+import logging
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 
@@ -17,6 +18,20 @@ class SilentCloseResultProperties:
 
     run_llm: bool = False
     on_context_updated: Optional[Callable[[], Awaitable[None]]] = None
+
+
+@dataclass
+class SpokenCloseVetoResultProperties:
+    """Pipecat-compatible result properties for one tool-disabled reply."""
+
+    run_llm: bool = True
+    on_context_updated: Optional[Callable[[], Awaitable[None]]] = None
+
+
+class SilentCloseAuthorization(str, Enum):
+    """A semantic answer may require speech instead of a silent close."""
+
+    SPOKEN_RESPONSE_REQUIRED = "spoken_response_required"
 
 
 def get_end_conversation_tool_definition() -> Dict[str, Any]:
@@ -61,6 +76,19 @@ def create_end_conversation_tool_handler(
         safe_to_close = close_is_safe(params.tool_call_id)
         if inspect.isawaitable(safe_to_close):
             safe_to_close = await safe_to_close
+        if safe_to_close is SilentCloseAuthorization.SPOKEN_RESPONSE_REQUIRED:
+            await params.result_callback(
+                {
+                    "status": "spoken_response_required",
+                    "instruction": (
+                        "Give one brief natural spoken response acknowledging the "
+                        "user's completion or decision. Ask no question, call no tool, "
+                        "and do not mention conversation controls."
+                    ),
+                },
+                properties=SpokenCloseVetoResultProperties(),
+            )
+            return
         if safe_to_close is not True:
             await params.result_callback(
                 {

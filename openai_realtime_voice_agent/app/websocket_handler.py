@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import secrets
 import time
 import uuid
@@ -49,6 +50,33 @@ from app.single_owner_websocket import (
 
 logger = logging.getLogger(__name__)
 
+_HIGH_CONFIDENCE_GRATITUDE = re.compile(
+    r"\b(?:thanks|thank you|many thanks|cheers)\b"
+)
+_FIRST_PERSON_COMPLETION = re.compile(
+    r"\bi (?:(?:now )?know what i (?:want|need)|"
+    r"(?:have|ve) (?:now )?decided|"
+    r"(?:have|ve) made (?:up )?my (?:mind|decision)|"
+    r"(?:am|m) (?:all )?(?:done|finished)|"
+    r"(?:have|ve) (?:got )?what i need|"
+    r"(?:do not|don t) need anything (?:else|more))\b"
+)
+_EXPLICIT_COMPLETION_OR_CANCELLATION = re.compile(
+    r"\b(?:no that (?:is|s) all|that (?:is|s) (?:all|everything)|never mind)\b"
+)
+
+
+def _answer_requires_spoken_close(transcript: str) -> bool:
+    """Reduce a confirmed answer to one non-reversible semantic veto bit."""
+    normalized = " ".join(
+        re.sub(r"[^a-z0-9]+", " ", transcript.casefold()).split()
+    )
+    return bool(
+        _HIGH_CONFIDENCE_GRATITUDE.search(normalized)
+        or _FIRST_PERSON_COMPLETION.search(normalized)
+        or _EXPLICIT_COMPLETION_OR_CANCELLATION.search(normalized)
+    )
+
 # The OpenAI Realtime API works in 24 kHz PCM16. The Voice PE firmware plays
 # 24 kHz back and streams 16 kHz up. IMPORTANT: pipecat 0.0.97's websocket INPUT
 # transport does NOT resample (only the OUTPUT transport does), and OpenAI
@@ -87,6 +115,7 @@ class _FollowUpAnswerGrant:
     user_item_id: Optional[str] = None
     user_item_sequence: Optional[int] = None
     confirmed: bool = False
+    semantic_close_veto: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +131,21 @@ class _SilentCloseContext:
     websocket: Any
     session_nonce: int
     wake_generation: int
+
+
+@dataclass(frozen=True)
+class _GracefulCloseContext:
+    websocket: Any
+    session_nonce: int
+    wake_generation: int
+    token: int
+
+
+@dataclass(frozen=True)
+class _GracefulCloseAckExpectation:
+    context: _GracefulCloseContext
+    stage: str
+    result: asyncio.Future
 
 
 @dataclass(frozen=True)
@@ -138,6 +182,7 @@ class _FollowUpReservation:
     active: bool = False
     continuation_armed: bool = False
     response_id: Optional[str] = None
+    response_generation: Optional[int] = None
     question_audio_started: bool = False
     playback_started: bool = False
     response_completed: bool = False
@@ -701,7 +746,7 @@ class WebSocketHandler:
             session_manager: Session manager instance
             audio_recording_service: Audio recording service instance
             follow_up_ms: Legacy automatic-window duration sent in `hello`.
-                Version 0.22.4 requires 0; explicit windows use the separate
+                Version 0.22.5 requires 0; explicit windows use the separate
                 PREPARE/READY/COMMIT transaction.
             follow_up_open_delay_ms: How long (ms) the device waits after a reply
                 finishes before opening that follow-up mic (bridges the speaker
@@ -740,13 +785,22 @@ class WebSocketHandler:
         # Old firmware and out-of-turn requests fail closed instead of silently
         # claiming that the next follow-up will be suppressed.
         self._graceful_close_lock = asyncio.Lock()
-        self._graceful_close_ack = asyncio.Event()
         self._graceful_close_next_token = 1
         self._graceful_close_pending_token: Optional[int] = None
-        self._graceful_close_ack_stage: Optional[str] = None
-        self._graceful_close_accepted = False
+        self._graceful_close_pending_context: Optional[
+            _GracefulCloseContext
+        ] = None
+        self._graceful_close_owner_context: Optional[
+            _GracefulCloseContext
+        ] = None
+        self._graceful_close_ack_expectation: Optional[
+            _GracefulCloseAckExpectation
+        ] = None
         self._graceful_close_requested_generation: Optional[int] = None
         self._graceful_close_committed_token: Optional[int] = None
+        self._graceful_close_committed_context: Optional[
+            _GracefulCloseContext
+        ] = None
         self._user_turn_non_close_generation: Optional[int] = None
         self._device_wake_generation = 0
         self._device_audio_generation: Optional[int] = None
@@ -769,6 +823,9 @@ class WebSocketHandler:
         self._issued_request_follow_up_tokens: set[int] = set()
         self._seen_ready_nonces: set[int] = set()
         self._request_follow_up_reservation: Optional[_FollowUpReservation] = None
+        self._bound_follow_up_question_context: Optional[
+            tuple[str, int, int, int]
+        ] = None
         self._request_follow_up_cancellations: Dict[tuple[int, int], _FollowUpReservation] = {}
         self._request_follow_up_expiry_task: Optional[asyncio.Task] = None
         self._request_follow_up_tasks: set[asyncio.Task] = set()
@@ -803,6 +860,9 @@ class WebSocketHandler:
         self._connection_recovery_active = True
         self._device_audio_generation = None
         self._open_follow_up_phase_grant = None
+        graceful_context = self._graceful_close_owner_context
+        if graceful_context is not None:
+            self._clear_graceful_close_context(graceful_context)
         retired_output = self._retire_assistant_output_grant()
         if retired_output is not None:
             existing = self._recovery_output_settlement_task
@@ -912,6 +972,18 @@ class WebSocketHandler:
         if self._follow_up_fail_closed or self._input_clear_fail_closed:
             return False
         if not self._physical_wake_is_current() or self._silent_close_is_current():
+            return False
+        bound_question = self._bound_follow_up_question_context
+        if (
+            bound_question is not None
+            and isinstance(context, tuple)
+            and len(context) == 2
+            and context == bound_question[:2]
+            and not self.request_follow_up_question_output_is_current(
+                context[0],
+                context[1],
+            )
+        ):
             return False
         reservation = self._request_follow_up_reservation
         if reservation is not None and reservation.stage is not _FollowUpStage.RESERVED:
@@ -1116,6 +1188,10 @@ class WebSocketHandler:
             retire_generation(context)
         return grant
 
+    def revoke_assistant_output(self) -> None:
+        """Synchronously revoke queued and in-flight PCM during recovery."""
+        self._retire_assistant_output_grant()
+
     async def _settle_retired_assistant_output(
         self,
         grant: Optional[_AssistantOutputGrant],
@@ -1297,6 +1373,9 @@ class WebSocketHandler:
                 on_response_failed=self.note_request_follow_up_response_failed,
                 on_continuation_arm=self.arm_request_follow_up_continuation,
                 on_continuation_failed=self.fail_request_follow_up_continuation,
+                on_question_output_authorized=(
+                    self.request_follow_up_question_output_is_current
+                ),
             )
         set_output_handlers = getattr(
             openai_service,
@@ -1308,14 +1387,17 @@ class WebSocketHandler:
                 on_response_created=self.bind_assistant_output_response,
                 on_audio_frame=self.register_assistant_output_frame,
                 on_before_tool_continuation=self.finish_assistant_output_response,
+                on_output_revoked=self.revoke_assistant_output,
             )
-        set_silent_close_authorizer = getattr(
+        set_spoken_close_authorizer = getattr(
             openai_service,
-            "set_silent_close_runtime_authorizer",
+            "set_spoken_close_response_authorizer",
             None,
         )
-        if set_silent_close_authorizer is not None:
-            set_silent_close_authorizer(self.silent_close_is_allowed)
+        if set_spoken_close_authorizer is not None:
+            set_spoken_close_authorizer(
+                self.silent_close_requires_spoken_response
+            )
         self._cancel_assistant_output_callback = getattr(
             openai_service,
             "cancel_assistant_output_response",
@@ -2175,9 +2257,17 @@ class WebSocketHandler:
         self,
         websocket,
         session_nonce: int,
+        *,
+        expected_wake_generation: Optional[int] = None,
     ) -> bool:
         """Unadmit and close the exact socket whose control state is ambiguous."""
         async with self._socket_transition_lock:
+            if expected_wake_generation is not None and (
+                tuple(self._websockets) != (websocket,)
+                or self._active_session_nonce != session_nonce
+                or self._device_wake_generation != expected_wake_generation
+            ):
+                return False
             retired_output = None
             if (
                 websocket in self._websockets
@@ -2194,6 +2284,12 @@ class WebSocketHandler:
                 self._request_follow_up_answer_grant = None
                 self._open_follow_up_phase_grant = None
                 self._silent_close_context = None
+                graceful_context = self._graceful_close_owner_context
+                if (
+                    graceful_context is not None
+                    and graceful_context.websocket is websocket
+                ):
+                    self._clear_graceful_close_context(graceful_context)
                 self._physical_wake_deadline = 0.0
             await self._settle_retired_assistant_output(retired_output)
             await self._cancel_retired_assistant_output(retired_output)
@@ -2288,7 +2384,7 @@ class WebSocketHandler:
             self._handle_cancel_request_follow_up_ack(data)
             return False
         if message_type == "suppress_followup_ack":
-            self._handle_graceful_close_ack(data)
+            self._handle_graceful_close_ack(data, websocket)
             return False
         session_nonce = data.get("session_nonce")
         wake_generation = data.get("wake_generation")
@@ -2435,62 +2531,91 @@ class WebSocketHandler:
         self,
         expected_non_close_generation: Optional[int] = None,
     ) -> bool:
-        """Prepare then commit one token-bound, drain-safe graceful close."""
-        await self._cancel_request_follow_up_and_wait()
+        """Prepare then commit one context-bound, drain-safe graceful close."""
         sockets = tuple(self._websockets)
-        if len(sockets) != 1 or self._active_session_nonce is None:
+        session_nonce = self._active_session_nonce
+        wake_generation = self._device_wake_generation
+        if len(sockets) != 1 or session_nonce is None:
             raise RuntimeError("No Voice PE is connected")
         if not self._physical_wake_is_current():
             return False
-        websocket = sockets[0]
-        session_nonce = self._active_session_nonce
-        wake_generation = self._device_wake_generation
-
-        def context_is_current() -> bool:
-            return (
-                tuple(self._websockets) == (websocket,)
-                and self._active_session_nonce == session_nonce
-                and self._device_wake_generation == wake_generation
-                and self._physical_wake_is_current()
-            )
-
+        await self._cancel_request_follow_up_and_wait()
         async with self._graceful_close_lock:
+            if self._graceful_close_owner_context is not None:
+                raise RuntimeError("A conflicting graceful close is active")
+            if (
+                tuple(self._websockets) != sockets
+                or self._active_session_nonce != session_nonce
+                or self._device_wake_generation != wake_generation
+                or not self._physical_wake_is_current()
+            ):
+                return False
             token = self._graceful_close_next_token
             self._graceful_close_next_token = (token % 0x7FFFFFFF) + 1
+            context = _GracefulCloseContext(
+                websocket=sockets[0],
+                session_nonce=session_nonce,
+                wake_generation=wake_generation,
+                token=token,
+            )
+            if not self._graceful_close_context_is_current(context):
+                return False
             self._graceful_close_pending_token = token
+            self._graceful_close_pending_context = context
+            # PREPARE may be accepted even when its ACK is lost. Retain this
+            # exact owner until a context-bound CANCEL succeeds or its socket dies.
+            self._graceful_close_owner_context = context
             try:
                 await self._send_graceful_close_stage(
                     "prepare_suppress_followup",
                     "prepared",
-                    token,
+                    context,
                 )
+                if not self._graceful_close_context_is_current(context):
+                    if self._graceful_close_owner_context is context:
+                        await self._cancel_graceful_close_context(context)
+                    return False
                 if (
-                    not context_is_current()
-                    or expected_non_close_generation is not None
+                    expected_non_close_generation is not None
                     and expected_non_close_generation
                     != TURN_LIVENESS.non_close_tool_generation
                 ):
-                    await self._cancel_graceful_close_token(token)
+                    await self._cancel_graceful_close_context(context)
                     return False
                 # Track before transmission: if firmware commits but its ACK is
                 # lost, a later non-close tool still knows which token to cancel.
                 self._graceful_close_committed_token = token
+                self._graceful_close_committed_context = context
                 await self._send_graceful_close_stage(
                     "commit_suppress_followup",
                     "committed",
-                    token,
+                    context,
                 )
+                if not self._graceful_close_context_is_current(context):
+                    if self._graceful_close_owner_context is context:
+                        await self._cancel_graceful_close_context(context)
+                    return False
                 if (
-                    not context_is_current()
-                    or expected_non_close_generation is not None
+                    expected_non_close_generation is not None
                     and expected_non_close_generation
                     != TURN_LIVENESS.non_close_tool_generation
                 ):
-                    await self._cancel_graceful_close_token(token)
+                    await self._cancel_graceful_close_context(context)
                     return False
                 return True
+            except BaseException:
+                if (
+                    self._graceful_close_owner_context is context
+                    and not self._graceful_close_context_is_current(context)
+                ):
+                    await asyncio.shield(
+                        self._cancel_graceful_close_context(context)
+                    )
+                raise
             finally:
-                self._graceful_close_pending_token = None
+                if self._graceful_close_pending_context is context:
+                    self._graceful_close_pending_context = None
+                    self._graceful_close_pending_token = None
 
     async def request_graceful_close(self) -> None:
         """Record a close request; arm it only at the final bot-stop boundary."""
@@ -2513,8 +2638,8 @@ class WebSocketHandler:
         """Drop a deferred close at a fresh user-turn boundary."""
         self._graceful_close_requested_generation = None
 
-    def silent_close_is_allowed(self) -> bool:
-        """Allow silent close only for this confirmed reopened-mic answer."""
+    def silent_close_decision_is_current(self) -> bool:
+        """Return whether this response may make a terminal close decision."""
         grant = self._request_follow_up_answer_grant
         return (
             grant is not None
@@ -2529,8 +2654,25 @@ class WebSocketHandler:
                     self._graceful_close_requested_generation,
                     self._graceful_close_pending_token,
                     self._graceful_close_committed_token,
+                    self._graceful_close_owner_context,
                 )
             )
+        )
+
+    def silent_close_requires_spoken_response(self) -> bool:
+        """Require speech when the exact answer semantically completed the turn."""
+        grant = self._request_follow_up_answer_grant
+        return bool(
+            self.silent_close_decision_is_current()
+            and grant is not None
+            and grant.semantic_close_veto
+        )
+
+    def silent_close_is_allowed(self) -> bool:
+        """Allow silent close only when the confirmed answer has no semantic veto."""
+        return (
+            self.silent_close_decision_is_current()
+            and not self.silent_close_requires_spoken_response()
         )
 
     async def request_silent_close(self) -> None:
@@ -2570,14 +2712,11 @@ class WebSocketHandler:
             if not sent:
                 raise RuntimeError("Silent close could not deliver final idle")
         except BaseException:
-            if (
-                context.websocket in self._websockets
-                and self._active_session_nonce == context.session_nonce
-            ):
-                await self._retire_bound_socket(
-                    context.websocket,
-                    context.session_nonce,
-                )
+            await self._retire_bound_socket(
+                context.websocket,
+                context.session_nonce,
+                expected_wake_generation=context.wake_generation,
+            )
             raise
 
     async def _check_nearby_media_activity(self) -> MediaActivity:
@@ -2629,8 +2768,10 @@ class WebSocketHandler:
 
         # A valid newer firmware wake is authoritative evidence that every old
         # local follow-up grant was already revoked before this message was sent.
+        self._settle_graceful_close_for_new_wake()
         self.invalidate_request_follow_up_turn(send_cancel=False)
         self._retire_assistant_output_grant()
+        self._bound_follow_up_question_context = None
         self._open_follow_up_phase_grant = None
         self._device_wake_generation = wake_generation
         self._device_audio_generation = wake_generation
@@ -2640,8 +2781,6 @@ class WebSocketHandler:
             time.monotonic() + self.PHYSICAL_WAKE_CEILING_S
         )
         self._silent_close_context = None
-        self._graceful_close_requested_generation = None
-        self._graceful_close_committed_token = None
         self._request_follow_up_budget_spent = False
         self._request_follow_up_budget_tool_call_id = None
         self._user_turn_non_close_generation = (
@@ -2716,6 +2855,7 @@ class WebSocketHandler:
                 self._graceful_close_requested_generation,
                 self._graceful_close_pending_token,
                 self._graceful_close_committed_token,
+                self._graceful_close_owner_context,
             )
         ):
             raise RuntimeError("A conflicting graceful close is active")
@@ -2881,6 +3021,7 @@ class WebSocketHandler:
         valid = self._request_follow_up_context_is_valid(reservation)
         self._request_follow_up_epoch += 1
         self._request_follow_up_reservation = None
+        self._bound_follow_up_question_context = None
         self._cancel_request_follow_up_expiry_task()
         self._request_follow_up_budget_spent = True
         self._request_follow_up_budget_tool_call_id = None
@@ -3090,10 +3231,12 @@ class WebSocketHandler:
                     self._graceful_close_requested_generation,
                     self._graceful_close_pending_token,
                     self._graceful_close_committed_token,
+                    self._graceful_close_owner_context,
                 )
             )
         ):
             return False
+        grant.semantic_close_veto = _answer_requires_spoken_close(transcript)
         grant.confirmed = True
         self._request_follow_up_budget_spent = False
         self._request_follow_up_budget_tool_call_id = None
@@ -3145,6 +3288,7 @@ class WebSocketHandler:
                     self._graceful_close_requested_generation,
                     self._graceful_close_pending_token,
                     self._graceful_close_committed_token,
+                    self._graceful_close_owner_context,
                 )
             )
         )
@@ -3179,30 +3323,80 @@ class WebSocketHandler:
         ):
             self.cancel_request_follow_up()
 
-    def bind_request_follow_up_response(self, response_id: Optional[str]) -> None:
+    def bind_request_follow_up_response(
+        self,
+        response_id: Optional[str],
+        response_generation: Optional[int],
+    ) -> bool:
         """Consume one response.created armed at the managed send boundary."""
         reservation = self._request_follow_up_reservation
         if reservation is None or not reservation.active:
-            return
+            return False
         if not self._request_follow_up_context_is_valid(reservation):
             self.cancel_request_follow_up()
-            return
+            return False
         if not reservation.continuation_armed:
             logger.info(
                 "Requested follow-up cancelled by an unowned competing response"
             )
             self.cancel_request_follow_up()
-            return
+            return False
         reservation.continuation_armed = False
-        if not response_id:
+        if (
+            not isinstance(response_id, str)
+            or not response_id
+            or type(response_generation) is not int
+            or response_generation <= 0
+        ):
             self.cancel_request_follow_up()
-            return
+            return False
         if reservation.response_id is None:
             reservation.response_id = response_id
-            return
-        if reservation.response_id != response_id:
+            reservation.response_generation = response_generation
+            reservation.expires_at = self._bounded_follow_up_expiry(
+                self.PHYSICAL_WAKE_CEILING_S
+            )
+            self._bound_follow_up_question_context = (
+                response_id,
+                response_generation,
+                reservation.epoch,
+                reservation.token,
+            )
+            self._arm_request_follow_up_expiry(reservation)
+            return True
+        if (
+            reservation.response_id != response_id
+            or reservation.response_generation != response_generation
+        ):
             logger.info("Requested follow-up cancelled by a conflicting response")
             self.cancel_request_follow_up()
+            return False
+        return True
+
+    def request_follow_up_question_output_is_current(
+        self,
+        response_id: str,
+        response_generation: int,
+    ) -> bool:
+        """Authorize held question output only for the exact live reservation."""
+        reservation = self._request_follow_up_reservation
+        return bool(
+            reservation is not None
+            and self._bound_follow_up_question_context
+            == (
+                response_id,
+                response_generation,
+                reservation.epoch,
+                reservation.token,
+            )
+            and reservation.active
+            and not reservation.cancel_requested
+            and reservation.stage is _FollowUpStage.RESERVED
+            and reservation.response_id == response_id
+            and reservation.response_generation == response_generation
+            and reservation.question_audio_started
+            and self._request_follow_up_context_is_valid(reservation)
+        )
 
     def note_request_follow_up_response_audio(
         self,
@@ -3750,94 +3944,196 @@ class WebSocketHandler:
         await self._cancel_request_follow_up_and_wait()
         self._graceful_close_requested_generation = None
         async with self._graceful_close_lock:
-            tokens = {
-                token
-                for token in (
-                    self._graceful_close_pending_token,
-                    self._graceful_close_committed_token,
-                )
-                if token is not None
-            }
-            for token in tokens:
-                await self._cancel_graceful_close_token(token)
+            context = self._graceful_close_owner_context
+            if context is not None:
+                await self._cancel_graceful_close_context(context)
 
-    async def _cancel_graceful_close_token(self, token: int) -> None:
+    def _graceful_close_context_is_current(
+        self,
+        context: _GracefulCloseContext,
+    ) -> bool:
+        return (
+            tuple(self._websockets) == (context.websocket,)
+            and self._active_session_nonce == context.session_nonce
+            and self._device_wake_generation == context.wake_generation
+            and self._physical_wake_is_current()
+        )
+
+    async def _send_graceful_close_control(
+        self,
+        context: _GracefulCloseContext,
+        message_type: str,
+        *,
+        require_current_context: bool,
+    ) -> bool:
+        if (
+            require_current_context
+            and not self._graceful_close_context_is_current(context)
+        ):
+            raise RuntimeError("Graceful close lost its physical wake owner")
+        if (
+            context.websocket not in self._websockets
+            or self._active_session_nonce != context.session_nonce
+        ):
+            if require_current_context:
+                raise RuntimeError("Graceful close lost its physical socket owner")
+            return False
+        payload = {
+            "type": message_type,
+            "token": context.token,
+            "session_nonce": context.session_nonce,
+            "wake_generation": context.wake_generation,
+        }
+        try:
+            await asyncio.wait_for(
+                context.websocket.send(json.dumps(payload, separators=(",", ":"))),
+                timeout=1.0,
+            )
+        except Exception as error:
+            logger.warning(
+                "⚠️ Could not deliver strict %s control: %r",
+                message_type,
+                error,
+            )
+            raise RuntimeError("No Voice PE accepted the control frame") from error
+        if (
+            require_current_context
+            and not self._graceful_close_context_is_current(context)
+        ):
+            raise RuntimeError("Graceful close changed owner during control send")
+        return True
+
+    def _clear_graceful_close_context(
+        self,
+        context: _GracefulCloseContext,
+    ) -> None:
+        expectation = self._graceful_close_ack_expectation
+        if expectation is not None and expectation.context is context:
+            self._graceful_close_ack_expectation = None
+            if not expectation.result.done():
+                expectation.result.set_result(None)
+        if self._graceful_close_pending_context is context:
+            self._graceful_close_pending_context = None
+            self._graceful_close_pending_token = None
+        if self._graceful_close_committed_context is context:
+            self._graceful_close_committed_context = None
+            self._graceful_close_committed_token = None
+        if self._graceful_close_owner_context is context:
+            self._graceful_close_owner_context = None
+
+    def _settle_graceful_close_for_new_wake(self) -> None:
+        """Burn every old graceful owner before installing a newer wake."""
+        expectation = self._graceful_close_ack_expectation
+        self._graceful_close_ack_expectation = None
+        if expectation is not None and not expectation.result.done():
+            expectation.result.set_result(None)
+        self._graceful_close_pending_context = None
+        self._graceful_close_pending_token = None
+        self._graceful_close_committed_context = None
+        self._graceful_close_committed_token = None
+        self._graceful_close_owner_context = None
+        self._graceful_close_requested_generation = None
+
+    async def _cancel_graceful_close_context(
+        self,
+        context: _GracefulCloseContext,
+    ) -> None:
         # Fail closed: callers must not execute a competing home action while
         # firmware may still be armed to suppress that action's follow-up.
-        await self._broadcast_json_strict(
-            {"type": "cancel_suppress_followup", "token": token}
+        await self._send_graceful_close_control(
+            context,
+            "cancel_suppress_followup",
+            require_current_context=False,
         )
-        if self._graceful_close_committed_token == token:
-            self._graceful_close_committed_token = None
+        self._clear_graceful_close_context(context)
 
     async def _send_graceful_close_stage(
         self,
         message_type: str,
         expected_stage: str,
-        token: int,
+        context: _GracefulCloseContext,
     ) -> None:
-        self._graceful_close_accepted = False
-        self._graceful_close_ack_stage = None
-        self._graceful_close_ack.clear()
+        expectation = _GracefulCloseAckExpectation(
+            context=context,
+            stage=expected_stage,
+            result=asyncio.get_running_loop().create_future(),
+        )
+        self._graceful_close_ack_expectation = expectation
         logger.info(
             "Graceful close %s sent; waiting %.1fs for Voice PE ACK",
             expected_stage,
             self.GRACEFUL_CLOSE_ACK_TIMEOUT_S,
         )
-        await self._broadcast_json_strict({"type": message_type, "token": token})
         try:
-            await asyncio.wait_for(
-                self._graceful_close_ack.wait(),
+            await self._send_graceful_close_control(
+                context,
+                message_type,
+                require_current_context=True,
+            )
+            accepted = await asyncio.wait_for(
+                expectation.result,
                 timeout=self.GRACEFUL_CLOSE_ACK_TIMEOUT_S,
             )
         except TimeoutError as error:
             raise RuntimeError(
                 f"Voice PE did not acknowledge graceful close {expected_stage}"
             ) from error
-        if not self._graceful_close_accepted:
+        finally:
+            if self._graceful_close_ack_expectation is expectation:
+                self._graceful_close_ack_expectation = None
+        if accepted is None:
+            raise RuntimeError("Graceful close physical owner was retired")
+        if accepted is not True:
+            self._clear_graceful_close_context(context)
             raise RuntimeError(
                 f"Voice PE rejected graceful close {expected_stage} outside an active turn"
-            )
-        if self._graceful_close_ack_stage != expected_stage:
-            raise RuntimeError(
-                f"Voice PE returned the wrong graceful close stage: "
-                f"{self._graceful_close_ack_stage}"
             )
         logger.info(
             "Graceful close %s acknowledged",
             expected_stage,
         )
 
-    def _handle_graceful_close_ack(self, data: dict) -> None:
-        """Accept only the ACK for the current token; ignore stale devices."""
+    def _handle_graceful_close_ack(
+        self,
+        data: dict,
+        websocket: Any = None,
+    ) -> None:
+        """Settle only the exact stage and immutable physical owner awaiting it."""
+        expectation = self._graceful_close_ack_expectation
+        context = expectation.context if expectation is not None else None
         token = data.get("token")
         session_nonce = data.get("session_nonce")
         wake_generation = data.get("wake_generation")
         stage = data.get("stage")
+        accepted = data.get("accepted")
         if (
-            set(data)
-            != {
-                "type",
-                "stage",
-                "token",
-                "session_nonce",
-                "wake_generation",
-                "accepted",
-            }
+            expectation is None
+            or context is None
+            or not has_exact_fields(
+                data,
+                TRUSTED_DEVICE_TO_BACKEND_FIELDS["suppress_followup_ack"],
+            )
+            or data.get("type") != "suppress_followup_ack"
             or type(token) is not int
-            or token != self._graceful_close_pending_token
+            or token != context.token
             or type(session_nonce) is not int
-            or session_nonce != self._active_session_nonce
+            or session_nonce != context.session_nonce
             or type(wake_generation) is not int
-            or wake_generation != self._device_wake_generation
-            or stage not in {"prepared", "committed"}
-            or type(data.get("accepted")) is not bool
+            or wake_generation != context.wake_generation
+            or stage != expectation.stage
+            or type(accepted) is not bool
+            or websocket is not context.websocket
+            or self._graceful_close_pending_context is not context
+            or self._graceful_close_owner_context is not context
+            or (
+                accepted is True
+                and not self._graceful_close_context_is_current(context)
+            )
+            or expectation.result.done()
         ):
             logger.warning("⚠️ Ignoring stale graceful-close ACK")
             return
-        self._graceful_close_ack_stage = stage
-        self._graceful_close_accepted = data.get("accepted") is True
-        self._graceful_close_ack.set()
+        expectation.result.set_result(accepted)
 
     async def broadcast_bytes(self, data: bytes) -> None:
         """Send raw binary (24 kHz mono PCM16 audio) to every connected device.
@@ -4185,6 +4481,9 @@ class WebSocketHandler:
                     # disconnect callback resumes. Its identity-owned output is
                     # already detached, so clear only stale application metadata.
                     if self._websockets:
+                        graceful_context = self._graceful_close_owner_context
+                        if graceful_context is not None:
+                            self._clear_graceful_close_context(graceful_context)
                         retired_output = self._retire_assistant_output_grant()
                         await self._settle_retired_assistant_output(retired_output)
                         await self._cancel_retired_assistant_output(retired_output)
@@ -4223,6 +4522,12 @@ class WebSocketHandler:
                 if was_admitted or was_pending:
                     self.invalidate_request_follow_up_turn(send_cancel=False)
                     self._mark_socket_retired(websocket)
+                graceful_context = self._graceful_close_owner_context
+                if (
+                    graceful_context is not None
+                    and graceful_context.websocket is websocket
+                ):
+                    self._clear_graceful_close_context(graceful_context)
                 if was_admitted:
                     retired_output = self._retire_assistant_output_grant()
                     await self._settle_retired_assistant_output(retired_output)
@@ -4249,6 +4554,9 @@ class WebSocketHandler:
         self._set_serializer_audio_admitted(False)
         self._device_audio_generation = None
         self._open_follow_up_phase_grant = None
+        graceful_context = self._graceful_close_owner_context
+        if graceful_context is not None:
+            self._clear_graceful_close_context(graceful_context)
         retired_output = self._retire_assistant_output_grant()
         hello_timeout_task = self._hello_timeout_task
         follow_up_expiry_task = self._request_follow_up_expiry_task
