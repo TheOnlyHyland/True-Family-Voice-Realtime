@@ -28,7 +28,7 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: "Required when publish=true, for example v0.22.5"
+        description: "Required when publish=true, for example v0.22.6"
         required: false
         type: string
       source_commit:
@@ -36,7 +36,7 @@ on:
         required: false
         type: string
       pilot_firmware_source_only:
-        description: "Historical pilot switch; rejected when publishing 0.22.5"
+        description: "Historical pilot switch; rejected when publishing 0.22.6"
         required: true
         default: false
         type: boolean
@@ -48,18 +48,18 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: theonlyhyland/true-family-voice-realtime/openai-realtime-voice-agent
-  ADDON_VERSION: 0.22.5
+  ADDON_VERSION: 0.22.6
   FIRMWARE_RELEASE_BINDING: finalized
-  FIRMWARE_RELEASE_VERSION: 0.20.1
-  FIRMWARE_RELEASE_SOURCE_COMMIT: 13ad7efe2df75f846f8fb48a939934db75efb5fd
+  FIRMWARE_RELEASE_VERSION: 0.20.2
+  FIRMWARE_RELEASE_SOURCE_COMMIT: f1ec219732e1015c63314b8ae7f395e4b10209eb
   FIRMWARE_RELEASE_REPOSITORY: TheOnlyHyland/True-Family-Voice-Firmware
-  FIRMWARE_RELEASE_MANIFEST_SHA256: 00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c
-  FIRMWARE_RELEASE_FACTORY_SHA256: 2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b
-  FIRMWARE_RELEASE_OTA_SHA256: 7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af
-  FIRMWARE_RELEASE_ELF_SHA256: 1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc
-  FIRMWARE_RELEASE_SHA256SUMS_SHA256: 05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2
-  RELEASE_EVIDENCE_ARTIFACT: true-family-voice-backend-0.22.5-release-evidence-${{ github.sha }}
-  RELEASE_EVIDENCE_FILE: true-family-voice-backend-0.22.5-release-evidence.json
+  FIRMWARE_RELEASE_MANIFEST_SHA256: 71793abf3f1a77c32e82a4ecca8c5549cf24ae7b4346599580cc919059ac4b21
+  FIRMWARE_RELEASE_FACTORY_SHA256: d64b1619257801cc5887a96e8a6f51e39719609a822d5f31506ec5780b9db9ab
+  FIRMWARE_RELEASE_OTA_SHA256: 5e33514f1d036eb263989c8e64930c0dfdb76c2fc5e9c7062a8eaa9d10940b48
+  FIRMWARE_RELEASE_ELF_SHA256: 97ba5a12444e4ec7e7c9348f9729d025f2d698dca039f1276cecfaa493c0d1e2
+  FIRMWARE_RELEASE_SHA256SUMS_SHA256: 7b518719f1e8a30190240bd027b975deb7bad6f6d92b9fdd422ef87318a55bc8
+  RELEASE_EVIDENCE_ARTIFACT: true-family-voice-backend-0.22.6-release-evidence-${{ github.sha }}
+  RELEASE_EVIDENCE_FILE: true-family-voice-backend-0.22.6-release-evidence.json
   POETRY_LOCK_SHA256: 13193c62fc95a0c05c7b6e89efe7db060b4f00438db46c83dc43a23eb1d9af15
   TITANET_MODEL_SHA256: d51abcf31717ef28162f26acb9d44dd4127c3d44c9b8624f699f3425daca8e77
   TITANET_MODEL_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_large.onnx
@@ -86,21 +86,21 @@ jobs:
         run: |
           set -euo pipefail
           test "$FIRMWARE_RELEASE_BINDING" = "finalized"
-          test "$FIRMWARE_RELEASE_VERSION" = "0.20.1"
+          test "$FIRMWARE_RELEASE_VERSION" = "0.20.2"
           test "$FIRMWARE_RELEASE_REPOSITORY" = \
             "TheOnlyHyland/True-Family-Voice-Firmware"
           test "$FIRMWARE_RELEASE_SOURCE_COMMIT" = \
-            "13ad7efe2df75f846f8fb48a939934db75efb5fd"
+            "f1ec219732e1015c63314b8ae7f395e4b10209eb"
           test "$FIRMWARE_RELEASE_MANIFEST_SHA256" = \
-            "00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c"
+            "71793abf3f1a77c32e82a4ecca8c5549cf24ae7b4346599580cc919059ac4b21"
           test "$FIRMWARE_RELEASE_FACTORY_SHA256" = \
-            "2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b"
+            "d64b1619257801cc5887a96e8a6f51e39719609a822d5f31506ec5780b9db9ab"
           test "$FIRMWARE_RELEASE_OTA_SHA256" = \
-            "7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af"
+            "5e33514f1d036eb263989c8e64930c0dfdb76c2fc5e9c7062a8eaa9d10940b48"
           test "$FIRMWARE_RELEASE_ELF_SHA256" = \
-            "1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc"
+            "97ba5a12444e4ec7e7c9348f9729d025f2d698dca039f1276cecfaa493c0d1e2"
           test "$FIRMWARE_RELEASE_SHA256SUMS_SHA256" = \
-            "05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2"
+            "7b518719f1e8a30190240bd027b975deb7bad6f6d92b9fdd422ef87318a55bc8"
           [[ "$FIRMWARE_RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$FIRMWARE_RELEASE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           for DIGEST in \

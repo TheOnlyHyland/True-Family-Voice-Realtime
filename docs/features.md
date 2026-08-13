@@ -76,7 +76,7 @@ administrator-provisioned per-person centroids (stored in
 a ≥3 s duration guard and the pitch heuristic as fallback. Guests classify as
 *unknown* and get neutral handling.
 
-Version 0.22.5 deliberately provides no backend enrollment path. No model tool,
+Version 0.22.6 deliberately provides no backend enrollment path. No model tool,
 device control, configuration option, or administrator endpoint can start a
 microphone recording. Existing prints are consumed only when the same name is in
 the add-on configuration:

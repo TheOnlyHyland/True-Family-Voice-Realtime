@@ -2,6 +2,18 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.6
+
+- Added `set_living_room_tv_power`, a fixed-target tool for
+  `switch.living_room_tv_smart_switch`. It accepts only `on` or `off`; the model
+  cannot supply an entity ID, service, or arbitrary target.
+- Living Room TV power no longer relies on generic `HassTurnOn` or `HassTurnOff`.
+  The tool calls the exact switch service and reports success only after bounded
+  read-back confirms the requested state on that same entity.
+- Bound this backend release to deployed public firmware `0.20.2` from source
+  commit `f1ec219732e1015c63314b8ae7f395e4b10209eb` and its immutable release
+  artifact digests.
+
 ## 0.22.5
 
 - Finalized the backend binding to public firmware `0.20.1` from

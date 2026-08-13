@@ -72,7 +72,7 @@ configuration:
   follow_up_listen_seconds:
     name: "💬 Conversation · Follow-up mode (must be 0)"
     description: >-
-      Version 0.22.5 requires 0: ordinary replies close the microphone, and the
+      Version 0.22.6 requires 0: ordinary replies close the microphone, and the
       model may request one no-wake window whenever another conversational turn
       is useful. After each genuine answer it may request another, with no round
       count limit inside the existing 120-second physical-wake ceiling. A saved
@@ -191,13 +191,14 @@ configuration:
       safely skips player reads; exact on requires every configured player to be
       inactive. Missing, denied, malformed, unknown, unavailable, or timed-out
       power state keeps the microphone closed. Leave blank to retain player-only
-      checks. This switch is never exposed to the model and is never controlled.
+      checks. Version 0.22.6 also controls this fixed switch through its dedicated,
+      read-back-verified Living Room TV power tool.
   nearby_media_players:
     name: "🏠 Home Assistant · Nearby media players"
     description: >-
       Required comma-separated media_player entity IDs near this Voice PE,
       maximum 16. For this deployment use media_player.living_room_tv and
-      media_player.living_room_tv_audio before starting 0.22.5.
+      media_player.living_room_tv_audio before starting 0.22.6.
       Before reserving and again immediately before opening a requested no-wake
       follow-up, the add-on checks only these exact entities. Playing, buffering,
       on, paused, unavailable, unknown, denied, malformed, or timed-out state
@@ -230,7 +231,7 @@ configuration:
       How many complete user-led turns the assistant remembers. Tool calls and
       their results stay together. More = better memory, but every answer
       re-bills the whole history, so long chats get expensive and can hit
-      OpenAI rate limits. 12 is a good balance. Version 0.22.5 requires a value
+      OpenAI rate limits. 12 is a good balance. Version 0.22.6 requires a value
       above 0 so a requested conversational turn survives a fresh wake.
   transcription_model:
     name: "⚙️ Advanced · Transcript model"
@@ -250,7 +251,7 @@ configuration:
     description: >-
       How the end of your question is detected. Normally leave this UNSET:
       the assistant then understands when your sentence is finished
-      (semantic_vad). Version 0.22.5 rejects the old "server_vad" silence-timer
+      (semantic_vad). Version 0.22.6 rejects the old "server_vad" silence-timer
       method at startup.
   vad_threshold:
     name: "⚙️ Advanced · server_vad: loudness threshold"
