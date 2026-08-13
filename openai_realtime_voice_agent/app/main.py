@@ -44,6 +44,12 @@ from app.room_light_tool import (
     get_room_light_tool_definition,
     register_room_light_tool,
 )
+from app.tv_power_tool import (
+    create_tv_power_dispatcher,
+    get_tv_power_tool_definition,
+    register_tv_power_tool,
+    resolve_generic_tv_power,
+)
 from app.end_conversation_tool import (
     END_CONVERSATION_TOOL_NAME,
     SilentCloseResultProperties,
@@ -197,19 +203,19 @@ def append_rapid_pilot_policy(instructions: str) -> str:
 
 
 def parse_rapid_pilot_follow_up_seconds(value: Any) -> int:
-    """Require the only supported 0.22.5 microphone mode."""
+    """Require the only supported 0.22.6 microphone mode."""
     if type(value) is int:
         seconds = value
     elif isinstance(value, str) and value.strip() == "0":
         seconds = 0
     else:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 exactly for the 0.22.5 rapid pilot; "
+            "follow_up_listen_seconds must be 0 exactly for the 0.22.6 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     if seconds != 0:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 for the 0.22.5 rapid pilot; "
+            "follow_up_listen_seconds must be 0 for the 0.22.6 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     return 0
@@ -223,11 +229,11 @@ def validate_rapid_pilot_prerequisites(
     """Keep startup mode, tool exposure, and policy prerequisites identical."""
     if turn_detection_type != "semantic_vad" or not backend_owned_response_creation:
         raise ValueError(
-            "The 0.22.5 rapid pilot requires managed semantic_vad response creation"
+            "The 0.22.6 rapid pilot requires managed semantic_vad response creation"
         )
     if max_context_messages <= 0:
         raise ValueError(
-            "The 0.22.5 rapid pilot requires max_context_messages greater than 0"
+            "The 0.22.6 rapid pilot requires max_context_messages greater than 0"
         )
 
 
@@ -239,7 +245,7 @@ def validate_selective_follow_up_media_scope(
     if request_follow_up_supported and not nearby_media_players:
         raise ValueError(
             "nearby_media_players must contain media_player.living_room_tv and "
-            "media_player.living_room_tv_audio for the 0.22.5 rapid pilot"
+            "media_player.living_room_tv_audio for the 0.22.6 rapid pilot"
         )
 
 
@@ -363,6 +369,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
             "request_follow_up_answer_started",
             None,
         )
+        self._tv_power_dispatcher = kwargs.pop("tv_power_dispatcher", None)
         super().__init__(*args, **kwargs)
         self._session_ready_event = asyncio.Event()
         self._session_generation = 0
@@ -4233,7 +4240,14 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                                 }
                             )
                         return
-                    result = await handler(params)
+                    tv_power = resolve_generic_tv_power(
+                        function_name,
+                        params.arguments,
+                    )
+                    if tv_power is not None and self._tv_power_dispatcher is not None:
+                        result = await self._tv_power_dispatcher(tv_power, params)
+                    else:
+                        result = await handler(params)
                     if not result_reported:
                         await params.result_callback(
                             {
@@ -4725,7 +4739,7 @@ class Application:
             os.environ.get("ENABLE_VOICE_MEMORY", "false").lower() == "true"
         )
         
-        # Version 0.22.5 is the serial explicit-follow-up pilot. Automatic mode
+        # Version 0.22.6 is the serial explicit-follow-up pilot. Automatic mode
         # is intentionally rejected rather than silently changing saved intent.
         follow_up_listen_seconds = parse_rapid_pilot_follow_up_seconds(
             os.environ.get("FOLLOW_UP_LISTEN_SECONDS", "0")
@@ -5070,6 +5084,9 @@ class Application:
             # Authoritative ON sequences for approved mixed Zigbee room groups.
             all_tools.append(get_room_light_tool_definition())
 
+            # Fixed-target, read-back-verified Living Room TV power.
+            all_tools.append(get_tv_power_tool_definition())
+
             # Closed-by-default mode exposes explicit follow-up and silent-close
             # controls. Both are native and must run as the sole tool.
             conversation_control = self._get_conversation_control_tool_definition()
@@ -5260,6 +5277,9 @@ class Application:
                     if self.request_follow_up_supported
                     else None
                 ),
+                tv_power_dispatcher=create_tv_power_dispatcher(
+                    self.ha_access_token
+                ),
             )
             logger.info(f"✅ OpenAI Service created: {type(self.openai_service).__name__}")
             
@@ -5323,6 +5343,8 @@ class Application:
             logger.info("✅ Registered read-only get_calendar_events tool")
             register_room_light_tool(self.openai_service, self.ha_access_token)
             logger.info("✅ Registered authoritative turn_on_room_lights tool")
+            register_tv_power_tool(self.openai_service, self.ha_access_token)
+            logger.info("✅ Registered authoritative set_living_room_tv_power tool")
             self._register_conversation_control_tool()
             
             logger.info("✅ New OpenAI Session created")

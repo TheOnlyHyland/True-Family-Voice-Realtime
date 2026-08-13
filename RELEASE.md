@@ -2,21 +2,21 @@
 
 ## Compatibility Order
 
-The exact Voice PE firmware binding for backend 0.22.5 is finalized:
+The exact Voice PE firmware binding for backend 0.22.6 is finalized:
 
-- Firmware version: `0.20.1`
+- Firmware version: `0.20.2`
 - Repository: `TheOnlyHyland/True-Family-Voice-Firmware`
-- Source commit: `13ad7efe2df75f846f8fb48a939934db75efb5fd`
+- Source commit: `f1ec219732e1015c63314b8ae7f395e4b10209eb`
 - Manifest SHA-256:
-  `00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c`
+  `71793abf3f1a77c32e82a4ecca8c5549cf24ae7b4346599580cc919059ac4b21`
 - Factory image SHA-256:
-  `2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b`
+  `d64b1619257801cc5887a96e8a6f51e39719609a822d5f31506ec5780b9db9ab`
 - OTA image SHA-256:
-  `7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af`
+  `5e33514f1d036eb263989c8e64930c0dfdb76c2fc5e9c7062a8eaa9d10940b48`
 - ELF SHA-256:
-  `1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc`
+  `97ba5a12444e4ec7e7c9348f9729d025f2d698dca039f1276cecfaa493c0d1e2`
 - `SHA256SUMS` SHA-256:
-  `05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2`
+  `7b518719f1e8a30190240bd027b975deb7bad6f6d92b9fdd422ef87318a55bc8`
 
 The workflow records `FIRMWARE_RELEASE_BINDING: finalized`. Publication and
 release jobs still fail closed unless every value above is exact, the public
@@ -24,13 +24,13 @@ firmware package matches every hash, and the checked-out source has the exact
 commit and version.
 
 > **Upgrade firmware first.** Keep the existing backend running, update and
-> verify exact firmware 0.20.1, then update to backend 0.22.5 only after its
-> protected images and GitHub release exist. Starting backend 0.22.5 before the
+> verify exact firmware 0.20.2, then update to backend 0.22.6 only after its
+> protected images and GitHub release exist. Starting backend 0.22.6 before the
 > firmware update succeeds is unsupported. A source checkout is not a release
 > artifact.
 
 > **Rollback the backend first.** Keep the newer firmware running, roll the
-> backend back to released 0.21.1, where explicit follow-up fails closed, or to
+> backend back to released 0.22.5, or to
 > the documented legacy 0.20.6 path when required, and verify reconnection before
 > considering any firmware rollback. Rolling
 > firmware back while a newer backend is running reverses the safe compatibility
@@ -64,7 +64,7 @@ Only after those checks does CI save and hash the exact image. A protected
 publication job loads that saved image, verifies the image ID and archive hash,
 and pushes it without rebuilding. After both architecture version and source tags
 are published, that same successful protected workflow records one validated
-machine-readable evidence artifact for backend 0.22.5. The artifact binds the
+machine-readable evidence artifact for backend 0.22.6. The artifact binds the
 candidate commit and exact aarch64/amd64 registry references to their SHA-256
 manifest digests and is retained for 90 days.
 
@@ -78,7 +78,7 @@ resolve to each recorded architecture digest. Comparing the tags only to each
 other is insufficient because two moved tags must not validate a release.
 
 Every PR, manual, publication, and release test job checks out exact firmware
-0.20.1 source commit `13ad7efe2df75f846f8fb48a939934db75efb5fd` and validates the full source-level
+0.20.2 source commit `f1ec219732e1015c63314b8ae7f395e4b10209eb` and validates the full source-level
 protocol contract, including the tokenized `follow_up_progress_phase` shape.
 Prepared package assets are not assumed public during PR or non-publishing manual
 CI, so those jobs do not download or require them. Publication and release jobs
@@ -86,14 +86,14 @@ additionally download the immutable public package and require every finalized
 hash above. Package evidence is never allowed to replace exact source validation.
 
 The historical `pilot_firmware_source_only` workflow input is retained for
-auditability but cannot authorize a 0.22.5 image or public GitHub release. Every
-0.22.5 publication requires `pilot_firmware_source_only=false`, a finalized public
+auditability but cannot authorize a 0.22.6 image or public GitHub release. Every
+0.22.6 publication requires `pilot_firmware_source_only=false`, a finalized public
 firmware source commit, and every exact release-artifact hash. Release-event
 verification enforces the same public binding.
 
 ## Follow-Up Transaction Authenticity
 
-The finalized firmware 0.20.1 binding must implement the fixture's exact
+The finalized firmware 0.20.2 binding must implement the fixture's exact
 `follow_up_progress_phase` shape: `type`, `value`, `token`, `session_nonce`, and
 `wake_generation`. Initial physical-wake phases retain the existing trusted
 four-field shape, and the historical two-field phase remains legacy-only.
@@ -121,7 +121,7 @@ before dispatch and forces recovery.
 
 ## Silent Terminal Decision Gate
 
-Backend 0.22.5 holds each managed response's text, audio transcript, and PCM until
+Backend 0.22.6 holds each managed response's text, audio transcript, and PCM until
 `response.done` establishes its exact terminal structure. The hold fails closed
 after 60 seconds, 3 MiB, or 4,096 events; reaching a bound discards the output and
 enters recovery rather than releasing a partial response. Ordinary valid speech
@@ -149,7 +149,7 @@ transport bind cannot restore the old output grant.
 
 ## Response-Generation Audio Barrier
 
-Backend 0.22.5 binds each assistant PCM source frame, Pipecat chunker operation,
+Backend 0.22.6 binds each assistant PCM source frame, Pipecat chunker operation,
 queued chunk, adapter-owned partial buffer, and active WebSocket write to the exact admitted
 socket and `(response_id, response_generation)`. A tool continuation waits for
 response A to finish before it arms a follow-up or creates response B. The drain
@@ -185,7 +185,7 @@ and untouched.
 
 ## Accepted Rapid-Pilot Privileges
 
-Version 0.22.5 deliberately inherits the pilot's `host_network: true`,
+Version 0.22.6 deliberately inherits the pilot's `host_network: true`,
 `homeassistant_api: true`, and read-write `/share` mount. These remain accepted
 deployment risks, not reduced-sandbox claims: a backend compromise can reach the
 host network, use the add-on's Home Assistant API credential, and alter the
@@ -217,24 +217,24 @@ its normal CI passes; never treat a source checkout as an installable release.
 1. Commit the exact release candidate on a reviewed candidate branch and let its
    normal CI pass. Do not merge the version bump to `main` yet.
 2. Manually dispatch **Build and Publish Home Assistant Addon** from that exact
-   candidate commit with `publish=true`, `release_tag=v0.22.5`, and
+   candidate commit with `publish=true`, `release_tag=v0.22.6`, and
    `source_commit=<the same 40-character commit>`. Keep
    `pilot_firmware_source_only=false`.
 3. Approve its protected `backend-production` environment gate only after both
    architecture build-and-smoke jobs pass. Require the publish job to finish
-   successfully with its unique backend 0.22.5 evidence artifact.
+   successfully with its unique backend 0.22.6 evidence artifact.
 4. Record both architecture image digests and verify the version and
    `sha-<commit>` tags resolve to the evidence values.
-5. Create tag `v0.22.5` at that exact candidate commit and publish the GitHub
+5. Create tag `v0.22.6` at that exact candidate commit and publish the GitHub
    release. The release event is verification-only and must not build or push an
    image.
 6. Wait for **Verify release uses pre-published immutable images** to pass. It
    must prove the exact successful publication run and its recorded digests.
 7. Only after release verification passes, merge the identical candidate tree to
-   `main`. This is the step that exposes repository metadata advertising 0.22.5
+   `main`. This is the step that exposes repository metadata advertising 0.22.6
    to Home Assistant users; merging earlier is prohibited.
 
-The publication workflow refuses to overwrite either an existing `0.22.5` tag
+The publication workflow refuses to overwrite either an existing `0.22.6` tag
 or its source-commit tag. A partially published failed run must be investigated;
 do not delete or replace a successful architecture tag without treating that as
 a new release version. A missing evidence artifact or failed release verification

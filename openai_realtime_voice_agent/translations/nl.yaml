@@ -73,7 +73,7 @@ configuration:
   follow_up_listen_seconds:
     name: "💬 Gesprek · Naluistermodus (moet 0 zijn)"
     description: >-
-      Versie 0.22.5 vereist 0: na gewone antwoorden sluit de microfoon en het
+      Versie 0.22.6 vereist 0: na gewone antwoorden sluit de microfoon en het
       model kan één naluistervenster aanvragen wanneer een volgende gespreksbeurt
       nuttig is. Na elk echt antwoord kan het opnieuw een venster aanvragen,
       zonder rondelimiet binnen de bestaande fysieke wake van 120 seconden. Een
@@ -195,8 +195,8 @@ configuration:
       uit slaat spelerlezingen veilig over; exact aan vereist dat alle ingestelde
       spelers inactief zijn. Ontbrekende, geweigerde, ongeldige, onbekende, niet
       beschikbare of te trage voedingsstatus houdt de microfoon dicht. Leeg
-      behoudt alleen de spelercontroles. Het model ziet of bedient deze schakelaar
-      nooit.
+      behoudt alleen de spelercontroles. Versie 0.22.6 bedient deze vaste
+      schakelaar ook via de aparte, met teruglezing geverifieerde tv-voedingstool.
   nearby_media_players:
     name: "🏠 Home Assistant · Mediaspelers in de buurt"
     description: >-
@@ -234,7 +234,7 @@ configuration:
     description: >-
       Hoeveel volledige, door de gebruiker gestarte beurten de assistent
       onthoudt. Toolaanroepen en resultaten blijven bij elkaar. Meer = beter
-      geheugen, maar ook hogere kosten. 12 is een goede balans. Versie 0.22.5
+      geheugen, maar ook hogere kosten. 12 is een goede balans. Versie 0.22.6
       vereist een waarde boven 0, zodat een aangevraagde gespreksbeurt na een
       nieuwe wake behouden blijft.
   transcription_model:
@@ -254,7 +254,7 @@ configuration:
     description: >-
       Hoe het einde van je vraag wordt herkend. Normaal NIET instellen: de
       assistent begrijpt dan zelf wanneer je zin af is (semantic_vad). Versie
-      0.22.5 weigert de oude "server_vad"-stiltetimer bij het opstarten.
+      0.22.6 weigert de oude "server_vad"-stiltetimer bij het opstarten.
   vad_threshold:
     name: "⚙️ Geavanceerd · server_vad: geluidsdrempel"
     description: >-

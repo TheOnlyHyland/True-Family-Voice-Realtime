@@ -25,23 +25,23 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "rapid_pilot_proto
 CONTRACT = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 FINAL_FIRMWARE_RELEASE = {
     "status": "finalized",
-    "version": "0.20.1",
+    "version": "0.20.2",
     "repository": "TheOnlyHyland/True-Family-Voice-Firmware",
-    "source_commit": "13ad7efe2df75f846f8fb48a939934db75efb5fd",
+    "source_commit": "f1ec219732e1015c63314b8ae7f395e4b10209eb",
     "manifest_sha256": (
-        "00c4439827f37d4b2d92ff52bfe1631263b209b6a014d1de38bef4c0f418930c"
+        "71793abf3f1a77c32e82a4ecca8c5549cf24ae7b4346599580cc919059ac4b21"
     ),
     "factory_sha256": (
-        "2dc5bac2c0185438339ef614c8572edc5387bf047b2929fd6ab6b05053bb857b"
+        "d64b1619257801cc5887a96e8a6f51e39719609a822d5f31506ec5780b9db9ab"
     ),
     "ota_sha256": (
-        "7fa2e386486d7b55b37f135da1bd7fd97fce13a50d2b105f559fd5f9559557af"
+        "5e33514f1d036eb263989c8e64930c0dfdb76c2fc5e9c7062a8eaa9d10940b48"
     ),
     "elf_sha256": (
-        "1037c5de9abcb38708deb765072b3e395a67d9884d3236d5ad83056a9f681cfc"
+        "97ba5a12444e4ec7e7c9348f9729d025f2d698dca039f1276cecfaa493c0d1e2"
     ),
     "sha256sums_sha256": (
-        "05dfdcbf50e50d5ea141ce6680890f264f369b072b5d0aec74919cb6c87b41e2"
+        "7b518719f1e8a30190240bd027b975deb7bad6f6d92b9fdd422ef87318a55bc8"
     ),
 }
 
@@ -83,8 +83,8 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             (ADDON_ROOT / "poetry.lock").read_bytes()
         ).hexdigest()
 
-        self.assertEqual(repository["addons"][0]["version"], "0.22.5")
-        self.assertEqual(pyproject["tool"]["poetry"]["version"], "0.22.5")
+        self.assertEqual(repository["addons"][0]["version"], "0.22.6")
+        self.assertEqual(pyproject["tool"]["poetry"]["version"], "0.22.6")
         locked_versions = {
             package["name"]: package["version"]
             for package in lock["package"]
@@ -96,7 +96,7 @@ class FirmwareProtocolContractTests(unittest.TestCase):
             lock_digest,
             "13193c62fc95a0c05c7b6e89efe7db060b4f00438db46c83dc43a23eb1d9af15",
         )
-        self.assertIn('version: "0.22.5"', config)
+        self.assertIn('version: "0.22.6"', config)
         self.assertIn('follow_up_listen_seconds: 0', config)
         self.assertIn("needs: test", workflow)
         self.assertIn('"poetry==$POETRY_VERSION"', workflow)
@@ -199,7 +199,7 @@ class FirmwareProtocolContractTests(unittest.TestCase):
         self.assertNotIn("pip3 install /tmp/app_build", dockerfile)
 
     def test_vendored_contract_is_bounded_and_explicitly_lan_only(self):
-        self.assertEqual(CONTRACT["backend_version"], "0.22.5")
+        self.assertEqual(CONTRACT["backend_version"], "0.22.6")
         self.assertEqual(
             CONTRACT["firmware_release_binding"],
             FINAL_FIRMWARE_RELEASE,

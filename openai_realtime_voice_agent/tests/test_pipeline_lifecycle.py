@@ -1025,6 +1025,48 @@ class PipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         service.push_error.assert_awaited_once()
         self.assertTrue(service._recovery_active)
 
+    async def test_generic_tv_power_call_is_intercepted_before_mcp_dispatch(self):
+        mcp_handler = AsyncMock()
+        tv_dispatcher = AsyncMock()
+        service = main.SafeRealtimeLLMService(tv_power_dispatcher=tv_dispatcher)
+        service.register_function("HassTurnOn", mcp_handler)
+        _, wrapped_handler = service._registered_function
+        params = types.SimpleNamespace(
+            tool_call_id="tv-power-call",
+            arguments={"name": "Living Room TV"},
+            result_callback=AsyncMock(),
+        )
+        service._tool_call_generations[params.tool_call_id] = 0
+
+        await wrapped_handler(params)
+
+        tv_dispatcher.assert_awaited_once_with("on", params)
+        mcp_handler.assert_not_awaited()
+
+    async def test_unrelated_generic_power_call_keeps_original_mcp_dispatch(self):
+        async def mcp_handler(params):
+            await params.result_callback({"status": "done"})
+
+        tv_dispatcher = AsyncMock()
+        service = main.SafeRealtimeLLMService(tv_power_dispatcher=tv_dispatcher)
+        service.register_function("HassTurnOff", mcp_handler)
+        _, wrapped_handler = service._registered_function
+        result_callback = AsyncMock()
+        params = types.SimpleNamespace(
+            tool_call_id="kitchen-power-call",
+            arguments={"name": "Kitchen plug"},
+            result_callback=result_callback,
+        )
+        service._tool_call_generations[params.tool_call_id] = 0
+
+        await wrapped_handler(params)
+
+        tv_dispatcher.assert_not_awaited()
+        result_callback.assert_awaited_once_with(
+            {"status": "done"},
+            properties=None,
+        )
+
     async def test_ordinary_non_tool_response_never_runs_audio_drain_barrier(self):
         service = main.SafeRealtimeLLMService(max_context_turns=12)
         drain = AsyncMock(return_value=True)
