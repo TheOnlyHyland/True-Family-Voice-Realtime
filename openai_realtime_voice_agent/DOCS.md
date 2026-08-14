@@ -20,10 +20,10 @@ complete option reference, agent integration, and FAQ:
 <https://github.com/TheOnlyHyland/True-Family-Voice-Realtime/tree/main/docs>.
 This page covers setup and day-to-day essentials.
 
-> **The backend 0.22.7 firmware binding is finalized to exact firmware 0.20.2.**
+> **The backend 0.22.8 firmware binding is finalized to exact firmware 0.20.2.**
 > Update and verify firmware first, then install only the protected published
 > backend image. Until that image and GitHub release exist, continue using
-> released backend 0.22.6. A source checkout is not deployable. Rollback remains
+> released backend 0.22.7. A source checkout is not deployable. Rollback remains
 > backend first and firmware second.
 
 ---
@@ -35,7 +35,7 @@ This page covers setup and day-to-day essentials.
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime`
 3. Find **True Family Voice Realtime** in the store and click **Install**.
    Home Assistant pulls the CI-verified image for this exact add-on version.
-4. Open the add-on's **Configuration** tab to set it up. For 0.22.7, update exact
+4. Open the add-on's **Configuration** tab to set it up. For 0.22.8, update exact
    firmware 0.20.2 first and install only the protected published backend image,
    never a source checkout.
 
@@ -103,12 +103,12 @@ option has plain-language inline help.
 | `wake_open_delay_ms` | `700` | the same echo guard right after the wake chime |
 | `vad_eagerness` | `low` | waits longest before deciding you're done talking |
 | `playback_prebuffer_ms` | `150` | raise to ~250 if you hear crackle; 0 = play immediately |
-| `max_context_messages` | `12` | complete user-led turns retained; version 0.22.7 requires a value above `0` |
+| `max_context_messages` | `12` | complete user-led turns retained; version 0.22.8 requires a value above `0` |
 | `enable_web_search` | `true` | online lookups; set `false` to disable |
 | `enable_voice_memory` | `false` | explicit opt-in for persistent memory tools and memory-file reads |
 | `web_search_model` | `gpt-5.5` | best-quality search model; mini/nano are cheaper |
 
-Version 0.22.7 holds managed output until the exact terminal response structure
+Version 0.22.8 holds managed output until the exact terminal response structure
 is known. Follow-up questions and required spoken completion acknowledgements are
 created with no tools, and question output is released only while its exact
 reservation, socket, session, and wake remain current. Ambiguous mixed control
@@ -121,7 +121,7 @@ output and recovery-raced release fail closed without leaking stale PCM.
 
 The legacy `server_vad` turn-detection fields live at the bottom of ⚙️ Advanced and
 only appear when you enable **"Show unused optional configuration options"**.
-Leave them unset: version 0.22.7 requires managed `semantic_vad` and rejects
+Leave them unset: version 0.22.8 requires managed `semantic_vad` and rejects
 `server_vad` at startup.
 
 The **complete option reference** (every option, purpose, default, when to change
@@ -164,7 +164,7 @@ assistant can address people by name, and
 gated tool politely refuses unless the gated voice was identified. Convenience,
 not biometric security. Leave names empty to disable.
 
-**Backend enrollment is not available in 0.22.7.** The add-on exposes no model,
+**Backend enrollment is not available in 0.22.8.** The add-on exposes no model,
 device, configuration, or administrator control that can start microphone
 enrollment. The rapid pilot only consumes prints that an administrator already
 provisioned under `/share/voice-prints/`; creating new reference audio and prints

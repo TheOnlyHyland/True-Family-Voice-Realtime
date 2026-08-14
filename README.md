@@ -96,10 +96,10 @@ and any attempted function call in those modes is quarantined before dispatch.
 
 ## Quick start
 
-> **The backend 0.22.7 firmware binding is finalized to exact firmware 0.20.2.**
+> **The backend 0.22.8 firmware binding is finalized to exact firmware 0.20.2.**
 > Update and verify firmware first, then install only the protected published
 > backend image. Until that image and GitHub release exist, keep using released
-> backend 0.22.6. A source checkout is not deployable. See
+> backend 0.22.7. A source checkout is not deployable. See
 > [Release Safety](RELEASE.md) for the immutable source and artifact binding.
 
 1. **Install the current published version, but do not start the add-on yet**: Settings → Add-ons → Add-on Store
@@ -107,7 +107,7 @@ and any attempted function call in those modes is quarantined before dispatch.
    `https://github.com/TheOnlyHyland/True-Family-Voice-Realtime` → install
    **True Family Voice Realtime** and set your OpenAI API key.
 2. **Give it your home**: add Home Assistant's **MCP Server** integration, expose the entities you want voice-controlled to Assist, and populate `mcp_tool_allowlist` with every exact desired tool name. Empty exposes no MCP tools.
-3. **Flash the firmware**: before backend 0.22.7, adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.20.2 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.2/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
+3. **Flash the firmware**: before backend 0.22.8, adopt your Voice PE in ESPHome Builder and paste in the [pinned 0.20.2 device stub](https://github.com/TheOnlyHyland/True-Family-Voice-Firmware/blob/0.20.2/esphome-builder.dhcp.yaml) from the firmware repo. First flash over USB; approved updates require advancing both immutable refs to the exact newer tag before compiling OTA.
 4. **Before startup**, set `nearby_media_power_entity` to `switch.living_room_tv_smart_switch` and `nearby_media_players` to `media_player.living_room_tv,media_player.living_room_tv_audio` for this home.
 5. **Start the protected published backend only after the firmware update succeeds**, then say
    **"Hey Leonard"** and ask for a light.
