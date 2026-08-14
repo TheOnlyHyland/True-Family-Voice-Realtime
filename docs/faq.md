@@ -134,10 +134,10 @@ New installs use `follow_up_listen_seconds: 0`: ordinary replies close the mic.
 The model may request one useful no-wake question at a time and, after each
 genuine answer, request another without a round-count limit inside the existing
 120-second physical wake. A random or unrelated reply ends the conversation
-silently. If an older install has a saved value above 0, the 0.22.6 add-on blocks
+silently. If an older install has a saved value above 0, the 0.22.7 add-on blocks
 startup until you set it to 0.
 
-Version 0.22.6 requires `nearby_media_players` to contain
+Version 0.22.7 requires `nearby_media_players` to contain
 `media_player.living_room_tv,media_player.living_room_tv_audio` for this home. Set
 the optional `nearby_media_power_entity` to
 `switch.living_room_tv_smart_switch`. Exact readable `off` skips the players

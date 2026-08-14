@@ -12,10 +12,10 @@ Two places hold configuration:
 
 > The `*_custom` fields and legacy `server_vad` fields are hidden until you toggle
 > **"Show unused optional configuration options"** at the bottom of the tab.
-> Version 0.22.6 requires the default `semantic_vad`; selecting `server_vad`
+> Version 0.22.7 requires the default `semantic_vad`; selecting `server_vad`
 > blocks startup.
 
-> **Version 0.22.6 is bound to exact firmware 0.20.2.** Update and verify that
+> **Version 0.22.7 is bound to exact firmware 0.20.2.** Update and verify that
 > firmware first, then install only the protected published backend image. A
 > source checkout is not a release artifact. Rollback remains backend first and
 > firmware second.
@@ -43,7 +43,7 @@ Two places hold configuration:
 
 | Option | Default | Purpose / when to change |
 |---|---|---|
-| `follow_up_listen_seconds` | `0` | Must remain `0` in version 0.22.6. Ordinary replies close the mic. The model may request one useful no-wake question at a time and, after each genuine answer, request another without a round-count limit inside the existing 120-second physical wake. A saved nonzero value fails startup instead of enabling legacy automatic mode. |
+| `follow_up_listen_seconds` | `0` | Must remain `0` in version 0.22.7. Ordinary replies close the mic. The model may request one useful no-wake question at a time and, after each genuine answer, request another without a round-count limit inside the existing 120-second physical wake. A saved nonzero value fails startup instead of enabling legacy automatic mode. |
 | `follow_up_open_delay_ms` | `700` | Echo guard: pause between the end of a reply and the mic re-opening, so the speaker's tail can't become a ghost question. Lower (300–500) is snappier but risks the assistant answering its own echo — raise it back if it "answers nobody" or repeats itself. |
 | `wake_open_delay_ms` | `700` | The same echo guard after the wake chime, before the mic opens. Lower for a snappier wake; raise if a wake sometimes triggers an answer to nothing. |
 | `vad_eagerness` | `low` | How quickly it decides you're done talking. `low` waits patiently (best if you pause mid-sentence), `high` answers faster but may cut you off, `auto` lets OpenAI decide. |
@@ -76,7 +76,7 @@ Two places hold configuration:
 | `ha_mcp_url` | *(empty)* | Leave empty (recommended): uses HA's built-in MCP Server integration. Only set a URL if you run the separate ha-mcp add-on. |
 | `longlived_token` | *(empty)* | Leave empty (recommended): the add-on uses its own supervisor permission. Only paste a long-lived token (HA profile → Security) if startup logs a 401/403 on `/core/api/mcp`. |
 | `mcp_tool_allowlist` | *(empty: no MCP tools)* | Required comma-separated list of exact, case-sensitive MCP tool names. Empty fails closed. To preserve whole-home behavior, populate the complete desired list before deployment, including every Home Assistant control/read tool and exposed custom script currently in use; do not replace that deployment list with a shortened example. A call is also checked against the tools exposed in the current session at dispatch time. |
-| `nearby_media_power_entity` | *(empty: player-only checks)* | Optional exact lowercase `switch` entity ID that powers the nearby players. For this home, set `switch.living_room_tv_smart_switch`. Exact readable `off` returns clear without querying players that are unavailable while unpowered. Exact `on` requires every configured player to pass the existing strict inactive-state check. Missing, denied, malformed, unknown, unavailable, or timed-out power state keeps the mic closed. Version 0.22.6 also uses this same fixed switch for its dedicated, read-back-verified Living Room TV power tool. |
+| `nearby_media_power_entity` | *(empty: player-only checks)* | Optional exact lowercase `switch` entity ID that powers the nearby players. For this home, set `switch.living_room_tv_smart_switch`. Exact readable `off` returns clear without querying players that are unavailable while unpowered. Exact `on` requires every configured player to pass the existing strict inactive-state check. Missing, denied, malformed, unknown, unavailable, or timed-out power state keeps the mic closed. Version 0.22.7 also uses this same fixed switch for its dedicated, read-back-verified Living Room TV power tool. |
 | `nearby_media_players` | *(empty: startup blocked)* | Required list of up to 16 exact `media_player` entity IDs near this Voice PE. For this home, set `media_player.living_room_tv,media_player.living_room_tv_audio`. Before a requested no-wake follow-up, the backend checks only these entities through authenticated HA REST, then checks again after firmware READY while the mic is still closed and before COMMIT. When the optional power switch is blank or exactly `on`, playing, buffering, on, paused, unavailable, unknown, denied, malformed, timed-out, or empty scope keeps the mic closed. The list is not exposed as a model tool. |
 | `enable_voice_memory` | `false` | Explicit privacy opt-in for the persistent `remember`, `forget`, and `list_memories` tools and for loading `/share/voice-memory/memory.md` into model instructions. Disabled sessions neither expose those tools nor read the file. |
 | `openclaw_url` | *(empty)* | Direct endpoint of your agent bridge. Enables the `ask_openclaw` escalation tool (called directly, ~2.5-minute budget, bypassing HA MCP's 60 s cap) and the instant `recall_memory` tool. Contract in [Agent Integration](agent-integration.md). |
@@ -88,7 +88,7 @@ Two places hold configuration:
 > authenticate a device or encrypt traffic. Run it only on a trusted, isolated
 > LAN; do not expose the WebSocket port to untrusted networks or the internet.
 
-> **Accepted inherited privileges:** 0.22.6 still uses host networking, the Home
+> **Accepted inherited privileges:** 0.22.7 still uses host networking, the Home
 > Assistant API credential, and read-write `/share`. Those process privileges are
 > not a model authorization policy. MCP authority remains limited to the exact
 > configured allow-list and the exact tool schema exposed in the current session.
@@ -99,13 +99,13 @@ Two places hold configuration:
 |---|---|---|
 | `websocket_port` | `8080` | The port the Voice PE connects to. Must match the `va_url` in the device firmware. Change only on a port clash (and for second devices — see [multi-device](getting-started.md#part-6--multiple-devices)); `8081` is used by dev builds. |
 | `session_reuse_timeout_seconds` | `300` | If the device reconnects within this window after a Wi-Fi blip, the conversation resumes. A full add-on restart starts fresh. |
-| `max_context_messages` | `12` | Complete user-led turns retained across the hourly OpenAI reconnect; tool calls and results stay together. Version 0.22.6 requires a value above `0` so a requested conversational turn survives a fresh wake. |
+| `max_context_messages` | `12` | Complete user-led turns retained across the hourly OpenAI reconnect; tool calls and results stay together. Version 0.22.7 requires a value above `0` so a requested conversational turn survives a fresh wake. |
 | `transcription_model` | `gpt-4o-transcribe` | Creates private bounded text for reconnect replay. Does **not** affect understanding — the main model hears your audio natively. Also: `gpt-realtime-whisper`, `gpt-4o-mini-transcribe`, `whisper-1`. |
 | `transcription_model_custom` | *(hidden)* | Custom transcription model id. |
-| `turn_detection_type` | *(unset)* | Leave unset. The 0.22.6 rapid pilot requires managed `semantic_vad`; selecting legacy `server_vad` blocks startup. |
-| `vad_threshold` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.22.6 startup. |
-| `vad_prefix_padding_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.22.6 startup. |
-| `vad_silence_duration_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.22.6 startup. |
+| `turn_detection_type` | *(unset)* | Leave unset. The 0.22.7 rapid pilot requires managed `semantic_vad`; selecting legacy `server_vad` blocks startup. |
+| `vad_threshold` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.22.7 startup. |
+| `vad_prefix_padding_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.22.7 startup. |
+| `vad_silence_duration_ms` | *(unset)* | Legacy `server_vad` saved-config field. Leave unset; using `server_vad` blocks 0.22.7 startup. |
 
 ## 🔍 Debug
 
