@@ -2,6 +2,21 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.7
+
+- Fixed sequential tool chains such as `GetDateTime` followed by
+  `get_calendar_events` so zero-tool-liveness gaps cannot finalize the turn or
+  retire its output owner before the final spoken response.
+- Bound finalization, phase signalling, PCM drain, terminal idle, and failure
+  cleanup to the exact response generation, physical socket, session, and wake.
+  Stale predecessor work cannot retire a successor response.
+- Hardened terminal output against delayed playback feedback, phase-context
+  races, follow-up epoch changes, failed writes, and repeated cancellation.
+  Fail-closed cleanup now completes before cancellation propagates.
+- Retained the finalized firmware `0.20.2` binding from source commit
+  `f1ec219732e1015c63314b8ae7f395e4b10209eb` and its immutable release
+  artifact digests.
+
 ## 0.22.6
 
 - Added `set_living_room_tv_power`, a fixed-target tool for

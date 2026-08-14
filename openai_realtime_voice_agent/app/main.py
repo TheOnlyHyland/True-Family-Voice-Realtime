@@ -31,7 +31,7 @@ from pipecat.pipeline.task import PipelineTask
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 from pipecat.transports.websocket.server import WebsocketServerTransport
 from app.mcp_service import HomeAssistantMCPService
-from app.phase_emitter import TURN_LIVENESS
+from app.phase_emitter import OutputChainState, TURN_LIVENESS
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
 from app.web_search_tool import get_web_search_tool_definition, create_web_search_tool_handler
 from app.calendar_tool import (
@@ -203,19 +203,19 @@ def append_rapid_pilot_policy(instructions: str) -> str:
 
 
 def parse_rapid_pilot_follow_up_seconds(value: Any) -> int:
-    """Require the only supported 0.22.6 microphone mode."""
+    """Require the only supported 0.22.7 microphone mode."""
     if type(value) is int:
         seconds = value
     elif isinstance(value, str) and value.strip() == "0":
         seconds = 0
     else:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 exactly for the 0.22.6 rapid pilot; "
+            "follow_up_listen_seconds must be 0 exactly for the 0.22.7 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     if seconds != 0:
         raise ValueError(
-            "follow_up_listen_seconds must be 0 for the 0.22.6 rapid pilot; "
+            "follow_up_listen_seconds must be 0 for the 0.22.7 rapid pilot; "
             "legacy automatic follow-up is disabled"
         )
     return 0
@@ -229,11 +229,11 @@ def validate_rapid_pilot_prerequisites(
     """Keep startup mode, tool exposure, and policy prerequisites identical."""
     if turn_detection_type != "semantic_vad" or not backend_owned_response_creation:
         raise ValueError(
-            "The 0.22.6 rapid pilot requires managed semantic_vad response creation"
+            "The 0.22.7 rapid pilot requires managed semantic_vad response creation"
         )
     if max_context_messages <= 0:
         raise ValueError(
-            "The 0.22.6 rapid pilot requires max_context_messages greater than 0"
+            "The 0.22.7 rapid pilot requires max_context_messages greater than 0"
         )
 
 
@@ -245,7 +245,7 @@ def validate_selective_follow_up_media_scope(
     if request_follow_up_supported and not nearby_media_players:
         raise ValueError(
             "nearby_media_players must contain media_player.living_room_tv and "
-            "media_player.living_room_tv_audio for the 0.22.6 rapid pilot"
+            "media_player.living_room_tv_audio for the 0.22.7 rapid pilot"
         )
 
 
@@ -341,6 +341,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
     DECISION_OUTPUT_HOLD_MAX_EVENTS = 4096
     MAX_SEEN_INPUT_SPEECH_ITEMS = 512
     RESPONSE_FINISHED_TIMEOUT_S = 60.0
+    MAX_OUTPUT_CHAIN_STATES = 64
     TURN_TERMINAL_TIMEOUT_S = 180.0
     TOOL_EXECUTION_LOCK_TIMEOUT_S = 10.0
     INPUT_CLEAR_SETTLE_TIMEOUT_S = 5.0
@@ -484,6 +485,53 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         self._terminal_response_ledgers = {}
         self._terminal_response_events = {}
         self._ttfb_delivered_output_contexts = set()
+        self._output_chain_states: dict[
+            tuple[str, int], OutputChainState
+        ] = {}
+
+    def _set_output_chain_state(
+        self,
+        context: tuple[str, int],
+        state: OutputChainState,
+    ) -> None:
+        self._output_chain_states[context] = state
+        while len(self._output_chain_states) > self.MAX_OUTPUT_CHAIN_STATES:
+            self._output_chain_states.pop(next(iter(self._output_chain_states)))
+
+    def assistant_output_chain_state(
+        self,
+        response_id: str,
+        response_generation: int,
+    ) -> OutputChainState:
+        """Return the exact response's fail-closed physical finalization state."""
+        return self._output_chain_states.get(
+            (response_id, response_generation),
+            OutputChainState.REVOKED,
+        )
+
+    def _begin_output_response_context(
+        self,
+        response_id: Optional[str],
+    ) -> Optional[tuple[str, int]]:
+        """Open one response generation and revoke every prior output owner."""
+        self._output_response_generation += 1
+        output_context = (
+            (response_id, self._output_response_generation)
+            if isinstance(response_id, str) and response_id
+            else None
+        )
+        self._active_output_response_context = output_context
+        for prior_context, prior_state in tuple(
+            self._output_chain_states.items()
+        ):
+            if prior_state is not OutputChainState.REVOKED:
+                self._output_chain_states[prior_context] = OutputChainState.REVOKED
+        if output_context is not None:
+            self._set_output_chain_state(
+                output_context,
+                OutputChainState.BUSY,
+            )
+        return output_context
 
     @staticmethod
     def _item_dict(item):
@@ -1808,6 +1856,8 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                     error.__class__.__name__,
                 )
         self._active_output_response_context = None
+        for context in tuple(self._output_chain_states):
+            self._output_chain_states[context] = OutputChainState.REVOKED
         self._run_llm_when_api_session_ready = False
         self._llm_needs_conversation_setup = False
         if (
@@ -3566,6 +3616,11 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                     self._response_finished.set()
                     self._managed_response_sent = False
         if interrupted_response:
+            if completed_output_context is not None:
+                self._set_output_chain_state(
+                    completed_output_context,
+                    OutputChainState.REVOKED,
+                )
             for item in response_output:
                 item_id = item.get("id")
                 if item_id:
@@ -3609,6 +3664,37 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                 )
             )
         self._signal_terminal_response(terminal_call_ids)
+        if completed_output_context is not None:
+            has_function_call = any(
+                item.get("type") == "function_call"
+                for item in response_output
+            )
+            chain_busy = bool(
+                has_function_call
+                or self._continuation_pending()
+                or self._running_tool_call_ids
+                or self._scheduled_tool_call_ids
+                or self._pending_tool_result_ids
+                or self._continuation_result_call_ids
+            )
+            if (
+                self._recovery_active
+                or interrupted_response
+                or not response_was_active
+                or finalization_error is not None
+            ):
+                chain_state = OutputChainState.REVOKED
+            elif getattr(evt.response, "status", None) != "completed":
+                chain_state = OutputChainState.REVOKED
+            elif (
+                getattr(evt.response, "status", None) == "completed"
+                and not chain_busy
+                and (turn_ended or not self._managed_context)
+            ):
+                chain_state = OutputChainState.FINALIZABLE
+            else:
+                chain_state = OutputChainState.BUSY
+            self._set_output_chain_state(completed_output_context, chain_state)
 
     async def _replay_history(
         self,
@@ -4361,13 +4447,7 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                     self._response_finished.clear()
                     response_id = getattr(evt.response, "id", None)
                     self._active_response_id = response_id
-                    self._output_response_generation += 1
-                    output_context = (
-                        (response_id, self._output_response_generation)
-                        if isinstance(response_id, str) and response_id
-                        else None
-                    )
-                    self._active_output_response_context = output_context
+                    output_context = self._begin_output_response_context(response_id)
                     response_mode = self._pending_tool_disabled_response_mode
                     self._pending_tool_disabled_response_mode = None
                     if response_mode is not None and output_context is None:
@@ -4418,6 +4498,10 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
                             if inspect.isawaitable(result):
                                 result = await result
                             if result is False:
+                                self._set_output_chain_state(
+                                    output_context,
+                                    OutputChainState.REVOKED,
+                                )
                                 self._active_output_response_context = None
                                 self._confirmed_follow_up_answer_identity = None
                         spoken_close_response_allowed = False
@@ -4739,7 +4823,7 @@ class Application:
             os.environ.get("ENABLE_VOICE_MEMORY", "false").lower() == "true"
         )
         
-        # Version 0.22.6 is the serial explicit-follow-up pilot. Automatic mode
+        # Version 0.22.7 is the serial explicit-follow-up pilot. Automatic mode
         # is intentionally rejected rather than silently changing saved intent.
         follow_up_listen_seconds = parse_rapid_pilot_follow_up_seconds(
             os.environ.get("FOLLOW_UP_LISTEN_SECONDS", "0")

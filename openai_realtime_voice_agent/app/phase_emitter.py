@@ -61,9 +61,11 @@ IMPORTANT — thinking watchdog + forced idle (v0.5.3):
        reply still plays (BotStarted -> replying) — degraded but never stuck.
 """
 import asyncio
+import inspect
 import logging
 import os
 import time
+from enum import Enum
 from typing import Optional
 
 from pipecat.frames.frames import (
@@ -78,6 +80,14 @@ from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 logger = logging.getLogger(__name__)
 
 _PHASE_CONTEXT_UNSET = object()
+
+
+class OutputChainState(str, Enum):
+    """Authoritative finalization state for one exact Realtime response."""
+
+    BUSY = "busy"
+    FINALIZABLE = "finalizable"
+    REVOKED = "revoked"
 
 
 class TurnLiveness:
@@ -141,6 +151,7 @@ class PhaseEmitter(FrameProcessor):
         capture_idle_context=None,
         capture_phase_context=None,
         capture_terminal_idle_context=None,
+        output_chain_state=None,
         **kwargs,
     ):
         """
@@ -161,6 +172,7 @@ class PhaseEmitter(FrameProcessor):
         self._capture_idle_context = capture_idle_context
         self._capture_phase_context = capture_phase_context
         self._capture_terminal_idle_context = capture_terminal_idle_context
+        self._output_chain_state = output_chain_state
         if idle_debounce_s is None:
             try:
                 idle_debounce_s = float(os.environ.get("PHASE_IDLE_DEBOUNCE_MS", "1500")) / 1000.0
@@ -168,6 +180,8 @@ class PhaseEmitter(FrameProcessor):
                 idle_debounce_s = 1.5
         self._idle_debounce_s = max(0.0, idle_debounce_s)
         self._idle_task = None
+        self._idle_finalization_started = False
+        self._suppress_bot_feedback = False
         self._watchdog_task = None
         self._phase_transition_lock = asyncio.Lock()
         self._current = None  # last phase actually sent, to dedupe redundant emits
@@ -250,22 +264,27 @@ class PhaseEmitter(FrameProcessor):
             ):
                 return
             phase_context = refreshed_context
-        if force_delivery and self._current == "idle":
-            async with self._phase_transition_lock:
-                logger.info("📞 phase -> idle (forced repeat)")
-                if self._send_phase is not None:
-                    try:
-                        if phase_context is _PHASE_CONTEXT_UNSET:
-                            await self._send_phase("idle")
-                        else:
-                            await self._send_phase(
-                                "idle",
-                                phase_context,
-                            )
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to emit phase 'idle': {e}")
-            return
-        await self._emit("idle", phase_context=phase_context)
+        self._idle_finalization_started = True
+        self._suppress_bot_feedback = True
+        try:
+            if force_delivery and self._current == "idle":
+                async with self._phase_transition_lock:
+                    logger.info("📞 phase -> idle (forced repeat)")
+                    if self._send_phase is not None:
+                        try:
+                            if phase_context is _PHASE_CONTEXT_UNSET:
+                                await self._send_phase("idle")
+                            else:
+                                await self._send_phase(
+                                    "idle",
+                                    phase_context,
+                                )
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to emit phase 'idle': {e}")
+                return
+            await self._emit("idle", phase_context=phase_context)
+        finally:
+            self._idle_finalization_started = False
 
     async def _emit(
         self,
@@ -350,16 +369,40 @@ class PhaseEmitter(FrameProcessor):
             await asyncio.sleep(self._idle_debounce_s)
         except asyncio.CancelledError:
             return
-        # A tool (web search, MCP call) can still be running when the filler
-        # reply's debounce expires — the turn isn't over, the model is
-        # "thinking" while it waits for the tool. Going idle here makes the
-        # device look done (idle LED, and it opens a follow-up window) while it
-        # is actually still working — confusing on a slow web search. Show
-        # `thinking` instead and arm the watchdog (which waits without a cap
-        # while a tool is in flight); the tool's result response then flips the
-        # phase to `replying`. Fast tools never reach here — their result reply
-        # cancels this debounce first.
-        if TURN_LIVENESS.in_flight > 0:
+        chain_state = None
+        while self._output_chain_state is not None:
+            try:
+                chain_state = self._output_chain_state(finalizer_context)
+                if inspect.isawaitable(chain_state):
+                    chain_state = await chain_state
+            except asyncio.CancelledError:
+                return
+            except Exception as error:
+                logger.warning(
+                    "Assistant output finalization state failed closed: %r",
+                    error,
+                )
+                return
+            if chain_state is OutputChainState.REVOKED:
+                return
+            if chain_state is not OutputChainState.BUSY:
+                break
+            await self._emit(
+                "thinking",
+                phase_context=phase_context,
+                preserve_output=True,
+            )
+            try:
+                await asyncio.sleep(self.WATCHDOG_POLL_S)
+            except asyncio.CancelledError:
+                return
+        if (
+            self._output_chain_state is not None
+            and chain_state is not OutputChainState.FINALIZABLE
+        ):
+            return
+        # Legacy/unbound processors retain the original in-flight tool guard.
+        if self._output_chain_state is None and TURN_LIVENESS.in_flight > 0:
             await self._emit(
                 "thinking",
                 phase_context=phase_context,
@@ -367,19 +410,29 @@ class PhaseEmitter(FrameProcessor):
             )
             self._arm_watchdog()
             return
-        if self._before_idle is not None:
-            try:
-                if self._capture_idle_context is None:
-                    proceed = await self._before_idle()
-                else:
-                    proceed = await self._before_idle(finalizer_context)
-                if proceed is False:
+        self._idle_finalization_started = True
+        try:
+            if self._before_idle is not None:
+                try:
+                    if self._capture_idle_context is None:
+                        proceed = await self._before_idle()
+                    else:
+                        proceed = await self._before_idle(finalizer_context)
+                    if proceed is False:
+                        return
+                except asyncio.CancelledError:
                     return
-            except asyncio.CancelledError:
+                except Exception as error:
+                    logger.warning("⚠️ conversation control before idle failed: %r", error)
+            if self._capture_terminal_idle_context is not None:
+                terminal_idle_context = self._capture_terminal_idle_context()
+            if terminal_idle_context is None:
                 return
-            except Exception as error:
-                logger.warning("⚠️ conversation control before idle failed: %r", error)
-        await self._emit("idle", phase_context=terminal_idle_context)
+            self._suppress_thinking = True
+            await self._emit("idle", phase_context=terminal_idle_context)
+            self._suppress_bot_feedback = True
+        finally:
+            self._idle_finalization_started = False
 
     async def _thinking_watchdog(self) -> None:
         """Force idle when `thinking` sits with no model activity (dead turn)."""
@@ -422,6 +475,7 @@ class PhaseEmitter(FrameProcessor):
             # Liveness stamp for the wedge watchdog: the server VAD is alive.
             self.last_vad_mono = time.monotonic()
             self._suppress_thinking = False
+            self._suppress_bot_feedback = False
             # A: a genuine utterance has begun this turn → not a dangling VAD,
             # and the kill-window must NOT cancel THIS turn's response.
             self._speech_since_wake = True
@@ -456,9 +510,11 @@ class PhaseEmitter(FrameProcessor):
                 await self._emit("thinking")
                 self._arm_watchdog()
         elif isinstance(frame, BotStartedSpeakingFrame):
+            if self._idle_finalization_started or self._suppress_bot_feedback:
+                return
             self._suppress_thinking = False
-            self._cancel_pending_idle()
             self._cancel_watchdog()
+            self._cancel_pending_idle()
             if self._on_bot_started is not None:
                 try:
                     self._on_bot_started()
@@ -466,6 +522,8 @@ class PhaseEmitter(FrameProcessor):
                     logger.warning("⚠️ bot-start callback failed: %r", error)
             await self._emit("replying")
         elif isinstance(frame, BotStoppedSpeakingFrame):
+            if self._idle_finalization_started or self._suppress_bot_feedback:
+                return
             # Don't go idle immediately — TTS comes in segments. Only emit idle
             # if the bot stays silent for the debounce window.
             self._cancel_pending_idle()

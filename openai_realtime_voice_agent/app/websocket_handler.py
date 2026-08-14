@@ -32,7 +32,7 @@ from pipecat.services.openai.realtime import events as openai_rt_events
 from app.raw_audio_serializer import RawAudioSerializer
 from app.session_manager import SessionManager
 from app.audio_recording_service import AudioRecordingService
-from app.phase_emitter import PhaseEmitter, TURN_LIVENESS
+from app.phase_emitter import OutputChainState, PhaseEmitter, TURN_LIVENESS
 from app.transcript_logger import TranscriptLogger
 from app.media_activity import MediaActivity
 from app.request_follow_up_tool import FollowUpReservationOutcome
@@ -102,6 +102,8 @@ class _ReplyFinalizerContext:
     session_nonce: int
     wake_generation: int
     reply_generation: int
+    response_id: Optional[str] = None
+    response_generation: Optional[int] = None
 
 
 @dataclass
@@ -166,6 +168,8 @@ class _PhaseAuthorizationContext:
     follow_up_epoch: int
     follow_up_token: Optional[int]
     terminal_idle: bool = False
+    response_id: Optional[str] = None
+    response_generation: Optional[int] = None
 
 
 @dataclass
@@ -746,7 +750,7 @@ class WebSocketHandler:
             session_manager: Session manager instance
             audio_recording_service: Audio recording service instance
             follow_up_ms: Legacy automatic-window duration sent in `hello`.
-                Version 0.22.6 requires 0; explicit windows use the separate
+                Version 0.22.7 requires 0; explicit windows use the separate
                 PREPARE/READY/COMMIT transaction.
             follow_up_open_delay_ms: How long (ms) the device waits after a reply
                 finishes before opening that follow-up mic (bridges the speaker
@@ -819,6 +823,7 @@ class WebSocketHandler:
         self._connection_recovery_active = False
         self._recovery_output_settlement_task: Optional[asyncio.Task] = None
         self._cancel_assistant_output_callback = None
+        self._assistant_output_chain_state_callback = None
         self._device_input_clear_generation = 0
         self._issued_request_follow_up_tokens: set[int] = set()
         self._seen_ready_nonces: set[int] = set()
@@ -1037,29 +1042,79 @@ class WebSocketHandler:
         )
         if finish_generation is None:
             return False
-        finished = await finish_generation(
-            context,
-            grant.websocket,
-            lambda: self._assistant_output_grant_is_current(grant),
-            timeout_s=max(0.0, deadline - time.monotonic()),
-        )
-        if finished is not True:
-            await self._settle_retired_assistant_output(grant)
-
-        async with self._socket_transition_lock:
-            current = self._assistant_output_grant_is_current(grant)
-            if finished is True and current:
-                return True
-            if self._assistant_output_grant is grant:
-                self._assistant_output_grant = None
-                retire_generation = getattr(
-                    self.transport,
-                    "retire_output_audio_generation",
-                    None,
+        try:
+            finished = await finish_generation(
+                context,
+                grant.websocket,
+                lambda: self._assistant_output_grant_is_current(grant),
+                timeout_s=max(0.0, deadline - time.monotonic()),
+            )
+            if finished is not True:
+                retirement = asyncio.create_task(
+                    self._retire_failed_assistant_output(grant)
                 )
-                if retire_generation is not None:
-                    retire_generation(context)
+                if await self._await_cancellation_safe(retirement):
+                    raise asyncio.CancelledError
+                return False
+
+            async with self._socket_transition_lock:
+                return self._assistant_output_grant_is_current(grant)
+        except asyncio.CancelledError:
+            retirement = asyncio.create_task(
+                self._retire_failed_assistant_output(grant)
+            )
+            await self._await_cancellation_safe(retirement)
+            raise
+        except Exception as error:
+            logger.warning(
+                "Assistant output drain failed closed: %s",
+                type(error).__name__,
+            )
+            retirement = asyncio.create_task(
+                self._retire_failed_assistant_output(grant)
+            )
+            if await self._await_cancellation_safe(retirement):
+                raise asyncio.CancelledError
             return False
+
+    async def _retire_failed_assistant_output(
+        self,
+        grant: _AssistantOutputGrant,
+    ) -> None:
+        """Settle and retire only the physical owner of a failed drain."""
+        async with self._socket_transition_lock:
+            if self._assistant_output_grant is not grant:
+                return
+            await self._settle_retired_assistant_output(grant)
+            if self._assistant_output_grant is not grant:
+                return
+            if (
+                tuple(self._websockets) == (grant.websocket,)
+                and self._active_session_nonce == grant.session_nonce
+                and self._device_wake_generation == grant.wake_generation
+            ):
+                await self._retire_bound_socket_locked(
+                    grant.websocket,
+                    grant.session_nonce,
+                    expected_wake_generation=grant.wake_generation,
+                    expected_output_grant=grant,
+                    settle_output=False,
+                )
+            else:
+                self._retire_assistant_output_grant()
+
+    @staticmethod
+    async def _await_cancellation_safe(task: asyncio.Task) -> bool:
+        """Finish fail-closed cleanup despite repeated caller cancellation."""
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+                continue
+        task.result()
+        return cancelled
 
     async def bind_assistant_output_response(
         self,
@@ -1358,6 +1413,7 @@ class WebSocketHandler:
             capture_terminal_idle_context=(
                 self.capture_terminal_idle_phase_authorization_context
             ),
+            output_chain_state=self.assistant_output_chain_state,
         )
 
         set_follow_up_handlers = getattr(
@@ -1389,6 +1445,11 @@ class WebSocketHandler:
                 on_before_tool_continuation=self.finish_assistant_output_response,
                 on_output_revoked=self.revoke_assistant_output,
             )
+        self._assistant_output_chain_state_callback = getattr(
+            openai_service,
+            "assistant_output_chain_state",
+            None,
+        )
         set_spoken_close_authorizer = getattr(
             openai_service,
             "set_spoken_close_response_authorizer",
@@ -2259,47 +2320,70 @@ class WebSocketHandler:
         session_nonce: int,
         *,
         expected_wake_generation: Optional[int] = None,
+        expected_output_grant: Optional[_AssistantOutputGrant] = None,
     ) -> bool:
         """Unadmit and close the exact socket whose control state is ambiguous."""
         async with self._socket_transition_lock:
-            if expected_wake_generation is not None and (
-                tuple(self._websockets) != (websocket,)
-                or self._active_session_nonce != session_nonce
-                or self._device_wake_generation != expected_wake_generation
-            ):
-                return False
-            retired_output = None
+            return await self._retire_bound_socket_locked(
+                websocket,
+                session_nonce,
+                expected_wake_generation=expected_wake_generation,
+                expected_output_grant=expected_output_grant,
+            )
+
+    async def _retire_bound_socket_locked(
+        self,
+        websocket,
+        session_nonce: int,
+        *,
+        expected_wake_generation: Optional[int] = None,
+        expected_output_grant: Optional[_AssistantOutputGrant] = None,
+        settle_output: bool = True,
+    ) -> bool:
+        if expected_wake_generation is not None and (
+            tuple(self._websockets) != (websocket,)
+            or self._active_session_nonce != session_nonce
+            or self._device_wake_generation != expected_wake_generation
+        ):
+            return False
+        if (
+            expected_output_grant is not None
+            and self._assistant_output_grant is not expected_output_grant
+        ):
+            return False
+        retired_output = None
+        if (
+            websocket in self._websockets
+            and self._active_session_nonce == session_nonce
+        ):
+            retired_output = self._retire_assistant_output_grant()
+            self._set_serializer_audio_admitted(False)
+            self._websockets.discard(websocket)
+            self._active_session_nonce = None
+            self._device_audio_generation = None
+            self._user_turn_non_close_generation = None
+            self._request_follow_up_budget_spent = True
+            self._request_follow_up_budget_tool_call_id = None
+            self._request_follow_up_answer_grant = None
+            self._open_follow_up_phase_grant = None
+            self._silent_close_context = None
+            graceful_context = self._graceful_close_owner_context
             if (
-                websocket in self._websockets
-                and self._active_session_nonce == session_nonce
+                graceful_context is not None
+                and graceful_context.websocket is websocket
             ):
-                retired_output = self._retire_assistant_output_grant()
-                self._set_serializer_audio_admitted(False)
-                self._websockets.discard(websocket)
-                self._active_session_nonce = None
-                self._device_audio_generation = None
-                self._user_turn_non_close_generation = None
-                self._request_follow_up_budget_spent = True
-                self._request_follow_up_budget_tool_call_id = None
-                self._request_follow_up_answer_grant = None
-                self._open_follow_up_phase_grant = None
-                self._silent_close_context = None
-                graceful_context = self._graceful_close_owner_context
-                if (
-                    graceful_context is not None
-                    and graceful_context.websocket is websocket
-                ):
-                    self._clear_graceful_close_context(graceful_context)
-                self._physical_wake_deadline = 0.0
+                self._clear_graceful_close_context(graceful_context)
+            self._physical_wake_deadline = 0.0
+        if settle_output:
             await self._settle_retired_assistant_output(retired_output)
-            await self._cancel_retired_assistant_output(retired_output)
-            closed = await self._retire_transport_client(websocket)
-            self._mark_socket_retired(websocket)
-            if closed:
-                self._notify_socket_retired(websocket)
-            else:
-                self._remember_uncertain_socket(websocket)
-            return closed
+        await self._cancel_retired_assistant_output(retired_output)
+        closed = await self._retire_transport_client(websocket)
+        self._mark_socket_retired(websocket)
+        if closed:
+            self._notify_socket_retired(websocket)
+        else:
+            self._remember_uncertain_socket(websocket)
+        return closed
 
     async def _clear_device_input_or_retire(
         self,
@@ -3458,23 +3542,61 @@ class WebSocketHandler:
             or self._device_wake_generation == 0
         ):
             return None
+        grant = self._assistant_output_grant
+        response_id = None
+        response_generation = None
+        if grant is not None and self._assistant_output_grant_is_current(grant):
+            response_id = grant.response_id
+            response_generation = grant.response_generation
         return _ReplyFinalizerContext(
             websocket=sockets[0],
             session_nonce=self._active_session_nonce,
             wake_generation=self._device_wake_generation,
             reply_generation=self._reply_generation,
+            response_id=response_id,
+            response_generation=response_generation,
         )
 
     def _reply_finalizer_is_current(
         self,
         context: Optional[_ReplyFinalizerContext],
     ) -> bool:
-        return (
+        if not (
             context is not None
             and tuple(self._websockets) == (context.websocket,)
             and self._active_session_nonce == context.session_nonce
             and self._device_wake_generation == context.wake_generation
             and self._reply_generation == context.reply_generation
+        ):
+            return False
+        if context.response_id is None or context.response_generation is None:
+            return self._assistant_output_chain_state_callback is None
+        grant = self._assistant_output_grant
+        return bool(
+            grant is not None
+            and self._assistant_output_grant_is_current(grant)
+            and (grant.response_id, grant.response_generation)
+            == (context.response_id, context.response_generation)
+        )
+
+    def assistant_output_chain_state(
+        self,
+        context: Optional[_ReplyFinalizerContext],
+    ) -> OutputChainState:
+        """Resolve one captured reply against the service's response lifecycle."""
+        if not self._reply_finalizer_is_current(context):
+            return OutputChainState.REVOKED
+        if self._assistant_output_chain_state_callback is None:
+            return OutputChainState.FINALIZABLE
+        if (
+            context is None
+            or context.response_id is None
+            or context.response_generation is None
+        ):
+            return OutputChainState.REVOKED
+        return self._assistant_output_chain_state_callback(
+            context.response_id,
+            context.response_generation,
         )
 
     def note_request_follow_up_response_done(
@@ -3911,9 +4033,29 @@ class WebSocketHandler:
         """Apply a deferred conversation control at the final reply boundary."""
         if context is None:
             context = self.capture_reply_finalizer_context()
-        if not self._reply_finalizer_is_current(context):
+        if (
+            not self._reply_finalizer_is_current(context)
+            or self.assistant_output_chain_state(context)
+            is not OutputChainState.FINALIZABLE
+        ):
             return False
         try:
+            if (
+                context is not None
+                and context.response_id is not None
+                and context.response_generation is not None
+            ):
+                if not await self.finish_assistant_output_response(
+                    context.response_id,
+                    context.response_generation,
+                ):
+                    return False
+            if (
+                not self._reply_finalizer_is_current(context)
+                or self.assistant_output_chain_state(context)
+                is not OutputChainState.FINALIZABLE
+            ):
+                return False
             await self._arm_requested_graceful_close()
             if not self._reply_finalizer_is_current(context):
                 return False
@@ -4227,6 +4369,15 @@ class WebSocketHandler:
             and self._open_follow_up_phase_grant_is_current(grant)
             else None
         )
+        output_grant = self._assistant_output_grant
+        response_id = None
+        response_generation = None
+        if (
+            output_grant is not None
+            and self._assistant_output_grant_is_current(output_grant)
+        ):
+            response_id = output_grant.response_id
+            response_generation = output_grant.response_generation
         return _PhaseAuthorizationContext(
             websocket=websockets[0],
             session_nonce=session_nonce,
@@ -4234,6 +4385,8 @@ class WebSocketHandler:
             follow_up_epoch=self._request_follow_up_epoch,
             follow_up_token=follow_up_token,
             terminal_idle=False,
+            response_id=response_id,
+            response_generation=response_generation,
         )
 
     def capture_terminal_idle_phase_authorization_context(
@@ -4250,6 +4403,8 @@ class WebSocketHandler:
             follow_up_epoch=context.follow_up_epoch,
             follow_up_token=None,
             terminal_idle=True,
+            response_id=context.response_id,
+            response_generation=context.response_generation,
         )
 
     async def _send_phase_for_context(
@@ -4261,6 +4416,8 @@ class WebSocketHandler:
         follow_up_token: Optional[int] = None,
         follow_up_epoch: Optional[int] = None,
         terminal_idle: bool = False,
+        response_id: Optional[str] = None,
+        response_generation: Optional[int] = None,
     ) -> bool:
         """Send a phase only while its exact physical wake context remains current."""
         async with self._socket_transition_lock:
@@ -4272,6 +4429,8 @@ class WebSocketHandler:
                 follow_up_token,
                 follow_up_epoch,
                 terminal_idle,
+                response_id,
+                response_generation,
             )
 
     async def _send_phase_for_context_locked(
@@ -4283,6 +4442,8 @@ class WebSocketHandler:
         follow_up_token: Optional[int] = None,
         follow_up_epoch: Optional[int] = None,
         terminal_idle: bool = False,
+        response_id: Optional[str] = None,
+        response_generation: Optional[int] = None,
     ) -> bool:
         context = _PhaseAuthorizationContext(
             websocket=websocket,
@@ -4295,6 +4456,8 @@ class WebSocketHandler:
             ),
             follow_up_token=follow_up_token,
             terminal_idle=terminal_idle,
+            response_id=response_id,
+            response_generation=response_generation,
         )
         if not self._phase_authorization_context_is_current(context):
             return False
@@ -4352,6 +4515,8 @@ class WebSocketHandler:
     def _phase_authorization_context_is_current(
         self,
         context: _PhaseAuthorizationContext,
+        *,
+        require_response: bool = True,
     ) -> bool:
         if (
             context.websocket not in self._websockets
@@ -4362,6 +4527,22 @@ class WebSocketHandler:
             or self._silent_close_is_current()
         ):
             return False
+        if require_response:
+            output_grant = self._assistant_output_grant
+            output_grant_is_current = (
+                output_grant is not None
+                and self._assistant_output_grant_is_current(output_grant)
+            )
+            if context.response_id is None:
+                if output_grant_is_current:
+                    return False
+            elif (
+                output_grant is None
+                or not output_grant_is_current
+                or (output_grant.response_id, output_grant.response_generation)
+                != (context.response_id, context.response_generation)
+            ):
+                return False
         grant = self._open_follow_up_phase_grant
         current_follow_up_token = (
             grant.token
@@ -4395,30 +4576,77 @@ class WebSocketHandler:
                 return False
             if preserve_output and (
                 value != "thinking"
-                or TURN_LIVENESS.in_flight <= 0
                 or self._assistant_output_grant is None
                 or not self._assistant_output_grant_is_current(
                     self._assistant_output_grant
+                )
+                or (context.response_id, context.response_generation)
+                != (
+                    self._assistant_output_grant.response_id,
+                    self._assistant_output_grant.response_generation,
                 )
             ):
                 return False
             if value in {"thinking", "idle"} and not preserve_output:
                 retired_output = self._retire_assistant_output_grant()
-                await self._settle_retired_assistant_output(retired_output)
-                if not self._phase_authorization_context_is_current(context):
+                try:
+                    await self._settle_retired_assistant_output(retired_output)
+                except asyncio.CancelledError:
+                    if value == "idle" and context.terminal_idle:
+                        retirement = asyncio.create_task(
+                            self._retire_bound_socket_locked(
+                                context.websocket,
+                                context.session_nonce,
+                                expected_wake_generation=context.wake_generation,
+                            )
+                        )
+                        await self._await_cancellation_safe(retirement)
+                    raise
+                if not self._phase_authorization_context_is_current(
+                    context,
+                    require_response=False,
+                ):
                     return False
             if value in {"thinking", "replying", "idle"}:
                 self._device_audio_generation = None
-            logger.info(f"➡️ broadcast phase '{value}' to {len(self._websockets)} device(s)")
-            sent = await self._send_phase_for_context_locked(
-                context.websocket,
-                value,
-                context.session_nonce,
-                context.wake_generation,
-                context.follow_up_token,
-                context.follow_up_epoch,
-                context.terminal_idle,
+            retains_response_owner = not (
+                value in {"thinking", "idle"} and not preserve_output
             )
+            logger.info(f"➡️ broadcast phase '{value}' to {len(self._websockets)} device(s)")
+            try:
+                sent = await self._send_phase_for_context_locked(
+                    context.websocket,
+                    value,
+                    context.session_nonce,
+                    context.wake_generation,
+                    context.follow_up_token,
+                    context.follow_up_epoch,
+                    context.terminal_idle,
+                    context.response_id if retains_response_owner else None,
+                    context.response_generation if retains_response_owner else None,
+                )
+            except asyncio.CancelledError:
+                if value == "idle" and context.terminal_idle:
+                    retirement = asyncio.create_task(
+                        self._retire_bound_socket_locked(
+                            context.websocket,
+                            context.session_nonce,
+                            expected_wake_generation=context.wake_generation,
+                        )
+                    )
+                    await self._await_cancellation_safe(retirement)
+                raise
+            if not sent and value == "idle" and context.terminal_idle:
+                retirement = asyncio.create_task(
+                    self._retire_bound_socket_locked(
+                        context.websocket,
+                        context.session_nonce,
+                        expected_wake_generation=context.wake_generation,
+                    )
+                )
+                if await self._await_cancellation_safe(retirement):
+                    raise asyncio.CancelledError
+                return False
             if sent:
                 grant = self._open_follow_up_phase_grant
                 if (

@@ -6,7 +6,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 
 class _FrameProcessor:
@@ -58,6 +58,7 @@ SPEC.loader.exec_module(phase_emitter)
 
 
 PhaseEmitter = phase_emitter.PhaseEmitter
+OutputChainState = phase_emitter.OutputChainState
 
 
 class PhaseEmitterTests(unittest.IsolatedAsyncioTestCase):
@@ -118,6 +119,38 @@ class PhaseEmitterTests(unittest.IsolatedAsyncioTestCase):
         await emitter._emit("thinking")
 
         self.assertEqual(emitter._current, "listening")
+
+    async def test_terminal_idle_recaptures_context_after_before_idle(self):
+        epoch = {"value": 1}
+        sent_epochs = []
+
+        def capture_terminal_idle_context():
+            return types.SimpleNamespace(epoch=epoch["value"])
+
+        async def before_idle():
+            epoch["value"] += 1
+            return True
+
+        async def send_phase(value, context):
+            self.assertEqual(value, "idle")
+            sent_epochs.append(context.epoch)
+            return context.epoch == epoch["value"]
+
+        emitter = PhaseEmitter(
+            send_phase,
+            idle_debounce_s=0,
+            before_idle=before_idle,
+            capture_terminal_idle_context=capture_terminal_idle_context,
+            output_chain_state=lambda _context: OutputChainState.FINALIZABLE,
+        )
+
+        await emitter._emit_idle_after_debounce(
+            object(),
+            terminal_idle_context=types.SimpleNamespace(epoch=1),
+        )
+
+        self.assertEqual(sent_epochs, [2])
+        self.assertEqual(emitter._current, "idle")
 
     async def test_queued_phase_uses_context_captured_before_transition_lock(self):
         wake_generation = {"value": 1}
@@ -192,6 +225,192 @@ class PhaseEmitterTests(unittest.IsolatedAsyncioTestCase):
             emitter._cancel_watchdog()
 
         self.assertEqual(sent, [("thinking", progress_context, True)])
+
+    async def test_queued_continuation_stays_thinking_at_zero_tool_liveness(self):
+        progress_context = object()
+        terminal_context = object()
+        finalizer_context = object()
+        states = [OutputChainState.BUSY, OutputChainState.FINALIZABLE]
+        sent = []
+
+        async def send_phase(value, context, preserve_output=False):
+            sent.append((value, context, preserve_output))
+            return True
+
+        emitter = PhaseEmitter(
+            send_phase,
+            idle_debounce_s=0.001,
+            before_idle=AsyncMock(return_value=True),
+            capture_idle_context=lambda: finalizer_context,
+            capture_phase_context=lambda: progress_context,
+            capture_terminal_idle_context=lambda: terminal_context,
+            output_chain_state=lambda context: states.pop(0),
+        )
+        emitter.WATCHDOG_POLL_S = 0.001
+
+        await emitter.process_frame(
+            phase_emitter.BotStoppedSpeakingFrame(),
+            None,
+        )
+        await asyncio.sleep(0.03)
+
+        self.assertEqual(
+            sent,
+            [
+                ("thinking", progress_context, True),
+                ("idle", terminal_context, False),
+            ],
+        )
+
+    async def test_successor_response_revokes_stale_idle_timer(self):
+        progress_context = object()
+        terminal_context = object()
+        finalizer_context = object()
+        send_phase = AsyncMock(return_value=True)
+        emitter = PhaseEmitter(
+            send_phase,
+            idle_debounce_s=0.001,
+            before_idle=AsyncMock(return_value=True),
+            capture_idle_context=lambda: finalizer_context,
+            capture_phase_context=lambda: progress_context,
+            capture_terminal_idle_context=lambda: terminal_context,
+            output_chain_state=lambda context: OutputChainState.REVOKED,
+        )
+
+        await emitter.process_frame(
+            phase_emitter.BotStoppedSpeakingFrame(),
+            None,
+        )
+        await asyncio.sleep(0.02)
+
+        send_phase.assert_not_awaited()
+
+    async def test_final_partial_bot_start_cannot_cancel_active_finalization(self):
+        finalization_started = asyncio.Event()
+        release_finalization = asyncio.Event()
+        idle_send_started = asyncio.Event()
+        release_idle_send = asyncio.Event()
+        sent = []
+        on_bot_started = Mock()
+
+        async def send_phase(value, context):
+            sent.append(value)
+            if value == "idle":
+                idle_send_started.set()
+                await release_idle_send.wait()
+            return True
+
+        async def before_idle(_context):
+            finalization_started.set()
+            await release_finalization.wait()
+            return True
+
+        emitter = PhaseEmitter(
+            send_phase,
+            idle_debounce_s=0.001,
+            before_idle=before_idle,
+            on_bot_started=on_bot_started,
+            capture_idle_context=object,
+            capture_phase_context=object,
+            capture_terminal_idle_context=object,
+            output_chain_state=lambda context: OutputChainState.FINALIZABLE,
+        )
+
+        await emitter.process_frame(
+            phase_emitter.BotStoppedSpeakingFrame(),
+            None,
+        )
+        await finalization_started.wait()
+        idle_task = emitter._idle_task
+
+        await emitter.process_frame(
+            phase_emitter.BotStartedSpeakingFrame(),
+            None,
+        )
+        await emitter.process_frame(
+            phase_emitter.BotStoppedSpeakingFrame(),
+            None,
+        )
+
+        self.assertIs(emitter._idle_task, idle_task)
+        self.assertFalse(idle_task.cancelled())
+        on_bot_started.assert_not_called()
+        release_finalization.set()
+        await idle_send_started.wait()
+
+        await emitter.process_frame(
+            phase_emitter.BotStartedSpeakingFrame(),
+            None,
+        )
+        await emitter.process_frame(
+            phase_emitter.BotStoppedSpeakingFrame(),
+            None,
+        )
+
+        self.assertIs(emitter._idle_task, idle_task)
+        self.assertFalse(idle_task.cancelled())
+        on_bot_started.assert_not_called()
+        release_idle_send.set()
+        await idle_task
+
+        self.assertEqual(sent, ["idle"])
+
+        await emitter.process_frame(
+            phase_emitter.UserStoppedSpeakingFrame(),
+            None,
+        )
+        await emitter.process_frame(
+            phase_emitter.BotStartedSpeakingFrame(),
+            None,
+        )
+        await emitter.process_frame(
+            phase_emitter.BotStoppedSpeakingFrame(),
+            None,
+        )
+        self.assertEqual(sent, ["idle"])
+        on_bot_started.assert_not_called()
+        self.assertTrue(emitter._suppress_thinking)
+        self.assertIsNone(emitter._watchdog_task)
+
+        await emitter.process_frame(
+            phase_emitter.UserStartedSpeakingFrame(),
+            None,
+        )
+        await emitter.process_frame(
+            phase_emitter.BotStartedSpeakingFrame(),
+            None,
+        )
+        self.assertEqual(sent, ["idle", "listening", "replying"])
+        on_bot_started.assert_called_once_with()
+
+    async def test_force_idle_suppresses_delayed_bot_feedback_until_real_speech(self):
+        sent = []
+        on_bot_started = Mock()
+
+        async def send_phase(value, context):
+            sent.append(value)
+            return True
+
+        emitter = PhaseEmitter(
+            send_phase,
+            on_bot_started=on_bot_started,
+            capture_phase_context=object,
+            capture_terminal_idle_context=object,
+        )
+        emitter._current = "replying"
+
+        await emitter.force_idle("test")
+        await emitter.process_frame(
+            phase_emitter.BotStartedSpeakingFrame(),
+            None,
+        )
+        await emitter.process_frame(
+            phase_emitter.BotStoppedSpeakingFrame(),
+            None,
+        )
+
+        self.assertEqual(sent, ["idle"])
+        on_bot_started.assert_not_called()
 
     async def test_terminal_idle_uses_distinct_tokenless_context(self):
         progress_context = object()
