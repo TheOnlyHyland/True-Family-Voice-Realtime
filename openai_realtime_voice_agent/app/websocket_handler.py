@@ -750,7 +750,7 @@ class WebSocketHandler:
             session_manager: Session manager instance
             audio_recording_service: Audio recording service instance
             follow_up_ms: Legacy automatic-window duration sent in `hello`.
-                Version 0.22.7 requires 0; explicit windows use the separate
+                Version 0.22.8 requires 0; explicit windows use the separate
                 PREPARE/READY/COMMIT transaction.
             follow_up_open_delay_ms: How long (ms) the device waits after a reply
                 finishes before opening that follow-up mic (bridges the speaker

@@ -28,7 +28,7 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: "Required when publish=true, for example v0.22.7"
+        description: "Required when publish=true, for example v0.22.8"
         required: false
         type: string
       source_commit:
@@ -36,7 +36,7 @@ on:
         required: false
         type: string
       pilot_firmware_source_only:
-        description: "Historical pilot switch; rejected when publishing 0.22.7"
+        description: "Historical pilot switch; rejected when publishing 0.22.8"
         required: true
         default: false
         type: boolean
@@ -48,7 +48,7 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: theonlyhyland/true-family-voice-realtime/openai-realtime-voice-agent
-  ADDON_VERSION: 0.22.7
+  ADDON_VERSION: 0.22.8
   FIRMWARE_RELEASE_BINDING: finalized
   FIRMWARE_RELEASE_VERSION: 0.20.2
   FIRMWARE_RELEASE_SOURCE_COMMIT: f1ec219732e1015c63314b8ae7f395e4b10209eb
@@ -58,8 +58,8 @@ env:
   FIRMWARE_RELEASE_OTA_SHA256: 5e33514f1d036eb263989c8e64930c0dfdb76c2fc5e9c7062a8eaa9d10940b48
   FIRMWARE_RELEASE_ELF_SHA256: 97ba5a12444e4ec7e7c9348f9729d025f2d698dca039f1276cecfaa493c0d1e2
   FIRMWARE_RELEASE_SHA256SUMS_SHA256: 7b518719f1e8a30190240bd027b975deb7bad6f6d92b9fdd422ef87318a55bc8
-  RELEASE_EVIDENCE_ARTIFACT: true-family-voice-backend-0.22.7-release-evidence-${{ github.sha }}
-  RELEASE_EVIDENCE_FILE: true-family-voice-backend-0.22.7-release-evidence.json
+  RELEASE_EVIDENCE_ARTIFACT: true-family-voice-backend-0.22.8-release-evidence-${{ github.sha }}
+  RELEASE_EVIDENCE_FILE: true-family-voice-backend-0.22.8-release-evidence.json
   POETRY_LOCK_SHA256: 13193c62fc95a0c05c7b6e89efe7db060b4f00438db46c83dc43a23eb1d9af15
   TITANET_MODEL_SHA256: d51abcf31717ef28162f26acb9d44dd4127c3d44c9b8624f699f3425daca8e77
   TITANET_MODEL_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_large.onnx

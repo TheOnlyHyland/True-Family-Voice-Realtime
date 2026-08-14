@@ -91,7 +91,7 @@ EXPECTED_SEQUENCES = {
             "light",
             "turn_on",
             {
-                "entity_id": "light.living_room_lighting",
+                "entity_id": "light.living_room_lights",
                 "brightness_pct": 100,
                 "color_temp_kelvin": 2950,
                 "transition": 2,
@@ -103,7 +103,7 @@ EXPECTED_SEQUENCES = {
             "light",
             "turn_on",
             {
-                "entity_id": "light.living_room_lighting",
+                "entity_id": "light.living_room_lights",
                 "brightness_pct": 100,
                 "color_temp_kelvin": 2950,
                 "transition": 2,

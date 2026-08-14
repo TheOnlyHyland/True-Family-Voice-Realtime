@@ -2,6 +2,16 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.8
+
+- Corrected the authoritative Living Room and dining-room light target from the
+  retired `light.living_room_lighting` entity to the live canonical
+  `light.living_room_lights` ten-fixture group used by current dashboards,
+  scripts, and automations.
+- Retained the finalized firmware `0.20.2` binding from source commit
+  `f1ec219732e1015c63314b8ae7f395e4b10209eb` and its immutable release
+  artifact digests.
+
 ## 0.22.7
 
 - Fixed sequential tool chains such as `GetDateTime` followed by
