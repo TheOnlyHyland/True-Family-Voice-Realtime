@@ -2,6 +2,16 @@
 
 All notable changes to this add-on. Newest first.
 
+## 0.22.9
+
+- Corrected the authoritative Upstairs Bathroom, downstairs Bathroom, and
+  Clark's Bedroom room-light targets to their live canonical groups:
+  `light.upstairs_bathroom_lights`, `light.downstairs_bathroom_lights`, and
+  `light.clarks_bedroom_lights`.
+- Retained the finalized firmware `0.20.2` binding from source commit
+  `f1ec219732e1015c63314b8ae7f395e4b10209eb` and its immutable release
+  artifact digests.
+
 ## 0.22.8
 
 - Corrected the authoritative Living Room and dining-room light target from the

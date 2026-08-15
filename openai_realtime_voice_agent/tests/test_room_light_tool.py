@@ -166,7 +166,7 @@ EXPECTED_SEQUENCES = {
             "light",
             "turn_on",
             {
-                "entity_id": "light.upstairs_bathroom",
+                "entity_id": "light.upstairs_bathroom_lights",
                 "brightness_pct": 90,
                 "color_temp_kelvin": 2726,
                 "transition": 2,
@@ -178,7 +178,7 @@ EXPECTED_SEQUENCES = {
             "light",
             "turn_on",
             {
-                "entity_id": "light.downstairs_bathroom",
+                "entity_id": "light.downstairs_bathroom_lights",
                 "brightness_pct": 80,
             },
         ),
@@ -188,7 +188,7 @@ EXPECTED_SEQUENCES = {
             "light",
             "turn_on",
             {
-                "entity_id": "light.clarks_bedroom",
+                "entity_id": "light.clarks_bedroom_lights",
                 "brightness_pct": 91,
                 "color_temp_kelvin": 2677,
                 "transition": 2,

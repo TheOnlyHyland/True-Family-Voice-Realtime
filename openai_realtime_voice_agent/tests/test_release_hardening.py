@@ -257,15 +257,15 @@ class ReleaseHardeningTests(unittest.TestCase):
 
     def test_current_release_changelog_covers_candidate_hardening(self):
         changelog = _read(ADDON_ROOT / "CHANGELOG.md")
-        current = changelog.split("## 0.22.8\n", 1)[1].split(
-            "\n## 0.22.7\n",
+        current = changelog.split("## 0.22.9\n", 1)[1].split(
+            "\n## 0.22.8\n",
             1,
         )[0]
 
         for term in (
-            "`light.living_room_lighting`",
-            "`light.living_room_lights`",
-            "ten-fixture group",
+            "`light.upstairs_bathroom_lights`",
+            "`light.downstairs_bathroom_lights`",
+            "`light.clarks_bedroom_lights`",
             "firmware `0.20.2`",
             "f1ec219732e1015c63314b8ae7f395e4b10209eb",
         ):
@@ -295,8 +295,8 @@ class ReleaseHardeningTests(unittest.TestCase):
         )
         for value in (LOCK_SHA256, MODEL_SHA256, AARCH64_BASE, AMD64_BASE):
             self.assertIn(value, workflow + dockerfile + build)
-        self.assertIn("ADDON_VERSION: 0.22.8", workflow)
-        self.assertIn("ARG BUILD_VERSION=0.22.8", dockerfile)
+        self.assertIn("ADDON_VERSION: 0.22.9", workflow)
+        self.assertIn("ARG BUILD_VERSION=0.22.9", dockerfile)
         self.assertIn("FIRMWARE_RELEASE_BINDING: finalized", workflow)
         self.assertNotIn("FIRMWARE_RELEASE_BINDING: pending", workflow)
         self.assertNotIn("REGRESSION_FIRMWARE_", workflow)
@@ -351,8 +351,8 @@ class ReleaseHardeningTests(unittest.TestCase):
             "Download exact smoked image artifacts",
             "environment: backend-production",
             'description: "Exact 40-character candidate commit to publish"',
-            'description: "Required when publish=true, for example v0.22.8"',
-            'description: "Historical pilot switch; rejected when publishing 0.22.8"',
+            'description: "Required when publish=true, for example v0.22.9"',
+            'description: "Historical pilot switch; rejected when publishing 0.22.9"',
             'test "$GITHUB_SHA" = "$SOURCE_COMMIT"',
             "Refuse immutable version or source-tag overwrite",
             "docker manifest inspect",
@@ -433,12 +433,12 @@ class ReleaseHardeningTests(unittest.TestCase):
         )
         self.assertIn(
             "RELEASE_EVIDENCE_ARTIFACT: "
-            "true-family-voice-backend-0.22.8-release-evidence-${{ github.sha }}",
+            "true-family-voice-backend-0.22.9-release-evidence-${{ github.sha }}",
             workflow,
         )
         self.assertIn(
             "RELEASE_EVIDENCE_FILE: "
-            "true-family-voice-backend-0.22.8-release-evidence.json",
+            "true-family-voice-backend-0.22.9-release-evidence.json",
             workflow,
         )
         self.assertIn("require-manifest-absent", publish_job)
@@ -497,7 +497,7 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("Release-event", release)
         self.assertIn("retained for 90 days", release)
         self.assertIn("two moved tags must not validate a release", release)
-        self.assertIn("repository metadata advertising 0.22.8", release)
+        self.assertIn("repository metadata advertising 0.22.9", release)
         self.assertIn("advance to a new backend version", release)
         self.assertIn("only an explicit manifest-not-found", release)
         self.assertIn("ambiguous Docker failures abort publication", release)
@@ -507,7 +507,7 @@ class ReleaseHardeningTests(unittest.TestCase):
         )
         candidate_ci = release.index("1. Commit the exact release candidate")
         protected_publish = release.index("2. Manually dispatch")
-        create_release = release.index("5. Create tag `v0.22.8`")
+        create_release = release.index("5. Create tag `v0.22.9`")
         release_verification = release.index("6. Wait for **Verify release")
         merge_main = release.index("7. Only after release verification passes")
         self.assertLess(candidate_ci, protected_publish)
@@ -544,8 +544,8 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("firmware first", docs)
         self.assertIn("backend first", docs)
         self.assertIn("firmware 0.20.2", docs)
+        self.assertIn("backend 0.22.9", docs)
         self.assertIn("backend 0.22.8", docs)
-        self.assertIn("backend 0.22.7", docs)
         self.assertIn("0.20.6", docs)
         self.assertIn("binding is finalized", docs)
         self.assertNotIn("firmware binding is pending", docs)
