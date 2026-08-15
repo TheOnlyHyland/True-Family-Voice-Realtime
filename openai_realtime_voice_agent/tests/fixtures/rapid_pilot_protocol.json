@@ -1,5 +1,5 @@
 {
-  "backend_version": "0.22.8",
+  "backend_version": "0.22.9",
   "legacy_backend_version": "0.20.6",
   "firmware_release_binding": {
     "status": "finalized",

@@ -2,7 +2,7 @@
 
 ## Compatibility Order
 
-The exact Voice PE firmware binding for backend 0.22.8 is finalized:
+The exact Voice PE firmware binding for backend 0.22.9 is finalized:
 
 - Firmware version: `0.20.2`
 - Repository: `TheOnlyHyland/True-Family-Voice-Firmware`
@@ -24,13 +24,13 @@ firmware package matches every hash, and the checked-out source has the exact
 commit and version.
 
 > **Upgrade firmware first.** Keep the existing backend running, update and
-> verify exact firmware 0.20.2, then update to backend 0.22.8 only after its
-> protected images and GitHub release exist. Starting backend 0.22.8 before the
+> verify exact firmware 0.20.2, then update to backend 0.22.9 only after its
+> protected images and GitHub release exist. Starting backend 0.22.9 before the
 > firmware update succeeds is unsupported. A source checkout is not a release
 > artifact.
 
 > **Rollback the backend first.** Keep the newer firmware running, roll the
-> backend back to released 0.22.7, or to
+> backend back to released 0.22.8, or to
 > the documented legacy 0.20.6 path when required, and verify reconnection before
 > considering any firmware rollback. Rolling
 > firmware back while a newer backend is running reverses the safe compatibility
@@ -64,7 +64,7 @@ Only after those checks does CI save and hash the exact image. A protected
 publication job loads that saved image, verifies the image ID and archive hash,
 and pushes it without rebuilding. After both architecture version and source tags
 are published, that same successful protected workflow records one validated
-machine-readable evidence artifact for backend 0.22.8. The artifact binds the
+machine-readable evidence artifact for backend 0.22.9. The artifact binds the
 candidate commit and exact aarch64/amd64 registry references to their SHA-256
 manifest digests and is retained for 90 days.
 
@@ -86,8 +86,8 @@ additionally download the immutable public package and require every finalized
 hash above. Package evidence is never allowed to replace exact source validation.
 
 The historical `pilot_firmware_source_only` workflow input is retained for
-auditability but cannot authorize a 0.22.8 image or public GitHub release. Every
-0.22.8 publication requires `pilot_firmware_source_only=false`, a finalized public
+auditability but cannot authorize a 0.22.9 image or public GitHub release. Every
+0.22.9 publication requires `pilot_firmware_source_only=false`, a finalized public
 firmware source commit, and every exact release-artifact hash. Release-event
 verification enforces the same public binding.
 
@@ -121,7 +121,7 @@ before dispatch and forces recovery.
 
 ## Silent Terminal Decision Gate
 
-Backend 0.22.8 holds each managed response's text, audio transcript, and PCM until
+Backend 0.22.9 holds each managed response's text, audio transcript, and PCM until
 `response.done` establishes its exact terminal structure. The hold fails closed
 after 60 seconds, 3 MiB, or 4,096 events; reaching a bound discards the output and
 enters recovery rather than releasing a partial response. Ordinary valid speech
@@ -149,7 +149,7 @@ transport bind cannot restore the old output grant.
 
 ## Response-Generation Audio Barrier
 
-Backend 0.22.8 binds each assistant PCM source frame, Pipecat chunker operation,
+Backend 0.22.9 binds each assistant PCM source frame, Pipecat chunker operation,
 queued chunk, adapter-owned partial buffer, and active WebSocket write to the exact admitted
 socket and `(response_id, response_generation)`. A tool continuation waits for
 response A to finish before it arms a follow-up or creates response B. The drain
@@ -185,7 +185,7 @@ and untouched.
 
 ## Accepted Rapid-Pilot Privileges
 
-Version 0.22.8 deliberately inherits the pilot's `host_network: true`,
+Version 0.22.9 deliberately inherits the pilot's `host_network: true`,
 `homeassistant_api: true`, and read-write `/share` mount. These remain accepted
 deployment risks, not reduced-sandbox claims: a backend compromise can reach the
 host network, use the add-on's Home Assistant API credential, and alter the
@@ -217,24 +217,24 @@ its normal CI passes; never treat a source checkout as an installable release.
 1. Commit the exact release candidate on a reviewed candidate branch and let its
    normal CI pass. Do not merge the version bump to `main` yet.
 2. Manually dispatch **Build and Publish Home Assistant Addon** from that exact
-   candidate commit with `publish=true`, `release_tag=v0.22.8`, and
+   candidate commit with `publish=true`, `release_tag=v0.22.9`, and
    `source_commit=<the same 40-character commit>`. Keep
    `pilot_firmware_source_only=false`.
 3. Approve its protected `backend-production` environment gate only after both
    architecture build-and-smoke jobs pass. Require the publish job to finish
-   successfully with its unique backend 0.22.8 evidence artifact.
+   successfully with its unique backend 0.22.9 evidence artifact.
 4. Record both architecture image digests and verify the version and
    `sha-<commit>` tags resolve to the evidence values.
-5. Create tag `v0.22.8` at that exact candidate commit and publish the GitHub
+5. Create tag `v0.22.9` at that exact candidate commit and publish the GitHub
    release. The release event is verification-only and must not build or push an
    image.
 6. Wait for **Verify release uses pre-published immutable images** to pass. It
    must prove the exact successful publication run and its recorded digests.
 7. Only after release verification passes, merge the identical candidate tree to
-   `main`. This is the step that exposes repository metadata advertising 0.22.8
+   `main`. This is the step that exposes repository metadata advertising 0.22.9
    to Home Assistant users; merging earlier is prohibited.
 
-The publication workflow refuses to overwrite either an existing `0.22.8` tag
+The publication workflow refuses to overwrite either an existing `0.22.9` tag
 or its source-commit tag. A partially published failed run must be investigated;
 do not delete or replace a successful architecture tag without treating that as
 a new release version. A missing evidence artifact or failed release verification

@@ -8,10 +8,10 @@ A complete, from-zero walkthrough. You'll set up two halves:
 Plan ~30–45 minutes the first time. Later firmware updates require deliberately
 advancing the two pinned release references after reviewing the new release.
 
-> **The backend 0.22.8 firmware binding is finalized to exact firmware 0.20.2.**
-> Update and verify firmware first, then install backend 0.22.8 only from its
+> **The backend 0.22.9 firmware binding is finalized to exact firmware 0.20.2.**
+> Update and verify firmware first, then install backend 0.22.9 only from its
 > protected published image. Until that image and GitHub release exist, keep
-> using released backend 0.22.7. A source checkout is not
+> using released backend 0.22.8. A source checkout is not
 > deployable. Roll back backend first and firmware second.
 
 ```
@@ -97,12 +97,12 @@ Before the first run, configure all required authority and media fences:
 Everything else can wait. The full reference — every option, its default, and when
 to change it — is in the [Configuration Reference](configuration.md).
 
-### 1.5 Use only the protected 0.22.8 release artifact
+### 1.5 Use only the protected 0.22.9 release artifact
 
-Save the configuration, but do **not** install or start backend 0.22.8 from a
+Save the configuration, but do **not** install or start backend 0.22.9 from a
 source checkout. Its binding is finalized to firmware 0.20.2, which must be
-updated and verified first. Install backend 0.22.8 only after the protected image
-and GitHub release exist; otherwise remain on released backend 0.22.7.
+updated and verified first. Install backend 0.22.9 only after the protected image
+and GitHub release exist; otherwise remain on released backend 0.22.8.
 
 ---
 
@@ -194,8 +194,8 @@ The device now boots with compatible firmware and waits for the backend.
 ### 2.5 Start the protected published backend
 
 Only after exact firmware 0.20.2 succeeds, install and start the protected
-published backend 0.22.8 image. If that release is not yet available, keep using
-released backend 0.22.7 rather than a source checkout. Click **Start** on the
+published backend 0.22.9 image. If that release is not yet available, keep using
+released backend 0.22.8 rather than a source checkout. Click **Start** on the
 add-on and open the **Log** tab. A healthy start shows
 `✅ Fetched N MCP tools` and
 `Creating session with N tools` (with `Hass*` names). The add-on listens on port
@@ -212,7 +212,7 @@ add-on and open the **Log** tab. A healthy start shows
    → a wake chime plays and the ring shows **listening**.
 3. Ask for something you exposed, e.g. *"turn on the bedroom lamp"* → the ring shows
    **thinking** → it acts and replies.
-4. Ordinary replies close the mic. In 0.22.8, the assistant may request one
+4. Ordinary replies close the mic. In 0.22.9, the assistant may request one
    useful no-wake question at a time and continue again after each genuine
    answer within the same 120-second physical wake. Missing, active, or uncertain
    nearby media keeps each requested window closed while conversation context
